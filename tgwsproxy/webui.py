@@ -35,9 +35,11 @@ from .config import (
 )
 from .server import ProxyServer
 from .updater import (
+    PreparedUpdate,
     UpdateError,
-    apply_update_async,
     check_for_update,
+    prepare_update_async,
+    spawn_apply,
 )
 
 log = logging.getLogger("tgwsproxy.webui")
@@ -264,19 +266,32 @@ class WebUI:
                 "info": info.as_dict(),
             })
 
+        # Download + extract first — if it fails we can report cleanly.
         try:
-            script = await apply_update_async(info)
+            prepared = await prepare_update_async(info)
         except UpdateError as exc:
             return _json_error(500, str(exc))
 
-        # The apply script will stop & restart the service in ~3 seconds.
+        # Defer the actual swap until after this response has flushed,
+        # otherwise the apply script's `init.d stop` kills us mid-write.
+        asyncio.create_task(self._deferred_swap(prepared))
+
         return _json_ok({
             "applied": True,
             "from": info.current,
             "to": info.latest,
-            "script": str(script),
+            "staging": str(prepared.staging),
             "info": info.as_dict(),
         })
+
+    async def _deferred_swap(self, prepared: PreparedUpdate) -> None:
+        # Wait long enough for the HTTP response to drain through the
+        # client socket; 1s is plenty for LAN.
+        await asyncio.sleep(1.0)
+        try:
+            await asyncio.to_thread(spawn_apply, prepared)
+        except Exception:
+            log.exception("update apply failed to spawn")
 
     async def _restart_proxy_quiet(self) -> None:
         try:

@@ -333,19 +333,28 @@ log "update complete"
     return script
 
 
-def apply_update(
+@dataclass
+class PreparedUpdate:
+    """An update that has been downloaded and extracted, ready to apply."""
+    staging: Path
+    info: UpdateInfo
+    install_root: Path
+    init_script: str
+    log_file: Path
+
+
+def prepare_update(
     info: UpdateInfo,
     *,
     install_root: str = DEFAULT_INSTALL_ROOT,
     init_script: str = DEFAULT_INIT_SCRIPT,
     staging_root: str = DEFAULT_STAGING_ROOT,
     log_file: Optional[str] = None,
-) -> Path:
-    """Download, extract, and spawn the apply script. Returns the script path.
+) -> PreparedUpdate:
+    """Download and extract the tarball; do NOT touch the live install yet.
 
-    This function does NOT wait for the apply to finish — the script keeps
-    running after this process exits, because we hand it off via Popen with
-    `start_new_session=True`.
+    Splitting prepare from spawn lets the web handler return a successful
+    response before the apply script stops the service.
     """
     if not info.tarball_url:
         raise UpdateError("no tarball_url in update info")
@@ -368,14 +377,25 @@ def apply_update(
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    script = _generate_apply_script(
-        staging_root=staging,
+    return PreparedUpdate(
+        staging=staging,
+        info=info,
         install_root=Path(install_root),
         init_script=init_script,
         log_file=log_path,
     )
 
-    log.info("spawning apply script: %s (log -> %s)", script, log_path)
+
+def spawn_apply(prepared: PreparedUpdate) -> Path:
+    """Write the apply script and start it in a detached session."""
+    script = _generate_apply_script(
+        staging_root=prepared.staging,
+        install_root=prepared.install_root,
+        init_script=prepared.init_script,
+        log_file=prepared.log_file,
+    )
+    log.info("spawning apply script: %s (log -> %s)",
+             script, prepared.log_file)
     subprocess.Popen(
         ["/bin/sh", str(script)],
         stdin=subprocess.DEVNULL,
@@ -385,6 +405,16 @@ def apply_update(
         close_fds=True,
     )
     return script
+
+
+def apply_update(info: UpdateInfo, **kwargs) -> Path:
+    """Convenience: prepare + spawn in one call. Used by the CLI."""
+    prepared = prepare_update(info, **kwargs)
+    return spawn_apply(prepared)
+
+
+async def prepare_update_async(info: UpdateInfo, **kwargs) -> PreparedUpdate:
+    return await asyncio.to_thread(prepare_update, info, **kwargs)
 
 
 async def apply_update_async(info: UpdateInfo, **kwargs) -> Path:
