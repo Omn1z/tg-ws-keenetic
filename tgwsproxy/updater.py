@@ -142,6 +142,7 @@ async def check_for_update(
     repo: str = DEFAULT_REPO, channel: str = "release"
 ) -> UpdateInfo:
     """Ask GitHub what the latest version is and whether we're behind."""
+    log.info("checking for updates: repo=%s channel=%s", repo, channel)
     if channel == "release":
         return await _check_release(repo)
     if channel == "main":
