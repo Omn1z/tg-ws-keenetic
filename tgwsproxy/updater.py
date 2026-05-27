@@ -204,7 +204,9 @@ def _current_sha_hint() -> str:
 
 def _download_tarball(url: str, dest: Path) -> None:
     log.info("downloading update tarball: %s", url)
-    data = _http_get(url, timeout=120, accept="application/gzip")
+    # GitHub's /tarball/<ref> endpoint rejects Accept: application/gzip
+    # with 415 even though the response IS gzip — it wants */*.
+    data = _http_get(url, timeout=120, accept="*/*")
     dest.write_bytes(data)
     log.info("downloaded %d bytes -> %s", len(data), dest)
 
