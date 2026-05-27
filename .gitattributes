@@ -1,0 +1,20 @@
+# Normalize line endings: text auto-detected, LF in repo.
+* text=auto eol=lf
+
+# Shell scripts and init scripts MUST be LF on disk (BusyBox sh chokes on CRLF).
+*.sh         text eol=lf
+S99tgwsproxy text eol=lf
+
+# Python — LF.
+*.py text eol=lf
+
+# Web assets — LF.
+*.html text eol=lf
+*.css  text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+
+# Markdown / docs — LF.
+*.md      text eol=lf
+LICENSE   text eol=lf
+.gitignore text eol=lf

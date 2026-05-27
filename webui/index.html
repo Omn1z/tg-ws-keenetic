@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TG WS Proxy &mdash; Keenetic</title>
+    <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="app">
+    <header class="topbar">
+        <h1>TG WS Proxy <span class="hint">для Keenetic Entware</span></h1>
+        <div class="meta">
+            <span id="status-pill" class="pill pill-off">offline</span>
+            <span id="version" class="muted"></span>
+        </div>
+    </header>
+
+    <main class="grid">
+        <section class="card">
+            <h2>Подключение к Telegram</h2>
+            <p class="muted">Скопируйте ссылку или отсканируйте QR на устройстве с Telegram.</p>
+            <div class="link-box">
+                <code id="link"></code>
+                <button id="copy-link" type="button">Скопировать</button>
+            </div>
+            <div class="quick">
+                <button id="btn-restart" type="button" class="secondary">Перезапустить прокси</button>
+                <button id="btn-new-secret" type="button" class="danger">Новый секрет</button>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>Статистика</h2>
+            <ul id="stats" class="stats"></ul>
+        </section>
+    </main>
+
+    <section class="card">
+        <h2>Настройки</h2>
+        <form id="cfg" autocomplete="off">
+            <fieldset>
+                <legend>Сетевые порты</legend>
+                <label>Хост прокси <input name="host" type="text" /></label>
+                <label>Порт прокси <input name="port" type="number" min="1" max="65535" /></label>
+                <label>Хост веб-интерфейса <input name="web_host" type="text" /></label>
+                <label>Порт веб-интерфейса <input name="web_port" type="number" min="1" max="65535" /></label>
+                <label>Хост в ссылке tg:// (пусто = взять из адреса этой страницы)
+                    <input name="link_host" type="text" placeholder="192.168.3.1" />
+                </label>
+            </fieldset>
+
+            <fieldset>
+                <legend>MTProto</legend>
+                <label>Secret (32 hex)
+                    <div class="row">
+                        <input name="secret" type="text" maxlength="32" />
+                    </div>
+                </label>
+                <label>Маршруты к ЦОД
+                    <textarea name="dc_redirects" rows="3" placeholder="2: 149.154.167.220&#10;4: 149.154.167.220"></textarea>
+                </label>
+            </fieldset>
+
+            <fieldset>
+                <legend>Fake TLS &amp; Cloudflare fallback</legend>
+                <label>Fake-TLS домен (SNI; пусто = выкл.)
+                    <input name="fake_tls_domain" type="text" placeholder="example.com" />
+                </label>
+                <label><input name="cfproxy" type="checkbox" /> Использовать публичный пул CF-доменов</label>
+                <label>Пользовательский CF-домен
+                    <input name="cfproxy_user_domain" type="text" placeholder="my.example.com" />
+                </label>
+                <label>CF Worker домен
+                    <input name="cfproxy_worker_domain" type="text" placeholder="my-worker.workers.dev" />
+                </label>
+            </fieldset>
+
+            <fieldset>
+                <legend>Производительность и логи</legend>
+                <label>Размер сокет-буфера, байт <input name="buffer_size" type="number" min="4096" /></label>
+                <label>Размер WS-пула на DC <input name="pool_size" type="number" min="0" /></label>
+                <label>Файл логов <input name="log_file" type="text" /></label>
+                <label>Размер ротации, MB <input name="log_max_mb" type="number" min="0.5" step="0.5" /></label>
+                <label>Кол-во ротированных файлов <input name="log_backups" type="number" min="0" /></label>
+                <label><input name="verbose" type="checkbox" /> Подробное логирование (DEBUG)</label>
+                <label><input name="proxy_protocol" type="checkbox" /> PROXY protocol v1 (за nginx/haproxy)</label>
+            </fieldset>
+
+            <fieldset>
+                <legend>Веб-интерфейс — авторизация</legend>
+                <label>Логин <input name="web_user" type="text" /></label>
+                <label>Пароль (пусто = без авторизации)
+                    <input name="web_password" type="password" />
+                </label>
+            </fieldset>
+
+            <div class="actions">
+                <button type="submit">Сохранить и перезапустить</button>
+                <button type="button" id="reload-cfg" class="secondary">Отменить</button>
+                <span id="save-result" class="result"></span>
+            </div>
+        </form>
+    </section>
+
+    <footer class="muted">
+        Конфигурация хранится в <code>/opt/etc/tgwsproxy/config.json</code> &mdash;
+        изменения через этот веб-интерфейс перезапишут файл.
+    </footer>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

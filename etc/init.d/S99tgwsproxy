@@ -1,0 +1,115 @@
+#!/bin/sh
+# Entware init script for tgwsproxy.
+# Drop into /opt/etc/init.d/ and chmod +x.
+
+ENABLED=yes
+DESC="Telegram MTProto-over-WebSocket proxy"
+PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+EXEC=/opt/bin/python3
+ARGS="-m tgwsproxy --config /opt/etc/tgwsproxy/config.json"
+WORKDIR=/opt/share/tgwsproxy
+PIDFILE=/opt/var/run/tgwsproxy.pid
+LOGDIR=/opt/var/log/tgwsproxy
+SSD=/opt/sbin/start-stop-daemon
+
+mkdir -p /opt/var/run "$LOGDIR" /opt/etc/tgwsproxy
+
+# Pick a daemonizer that exists on this system. start-stop-daemon ships with
+# Entware and is the cleanest option; fall back to a plain shell backgrounding
+# trick if it's missing.
+_spawn() {
+    if [ -x "$SSD" ]; then
+        "$SSD" -S -b -m -p "$PIDFILE" \
+            -d "$WORKDIR" \
+            -O "$LOGDIR/stdout.log" \
+            -x "$EXEC" -- $ARGS
+    else
+        cd "$WORKDIR" || return 1
+        ( "$EXEC" $ARGS >> "$LOGDIR/stdout.log" 2>&1 ) &
+        echo $! > "$PIDFILE"
+    fi
+}
+
+_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+start() {
+    if _running; then
+        echo "$DESC: already running (PID $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "Starting $DESC..."
+    if [ ! -x "$EXEC" ]; then
+        echo "ERROR: $EXEC not found — opkg install python3"
+        return 1
+    fi
+    if [ ! -d "$WORKDIR/tgwsproxy" ]; then
+        echo "ERROR: $WORKDIR/tgwsproxy missing — is tgwsproxy installed?"
+        return 1
+    fi
+    _spawn
+    # Give it a moment, then verify.
+    sleep 1
+    if _running; then
+        echo "$DESC started (PID $(cat "$PIDFILE"))"
+    else
+        echo "ERROR: $DESC failed to start; see $LOGDIR/stdout.log"
+        rm -f "$PIDFILE"
+        return 1
+    fi
+}
+
+stop() {
+    if ! _running; then
+        echo "$DESC: not running"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+    PID=$(cat "$PIDFILE")
+    echo "Stopping $DESC (PID $PID)..."
+    if [ -x "$SSD" ]; then
+        "$SSD" -K -q -p "$PIDFILE" -x "$EXEC"
+    else
+        kill -TERM "$PID" 2>/dev/null
+    fi
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$PID" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "Process did not exit; sending KILL"
+        kill -KILL "$PID" 2>/dev/null
+    fi
+    rm -f "$PIDFILE"
+    echo "$DESC stopped"
+}
+
+status() {
+    if _running; then
+        echo "$DESC is running (PID $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "$DESC is NOT running"
+    return 1
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) restart ;;
+    status)  status ;;
+    check)   status ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+exit $?
