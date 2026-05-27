@@ -181,6 +181,7 @@ form label:has(> input[type="checkbox"]) {
 form input[type="text"],
 form input[type="password"],
 form input[type="number"],
+form select,
 form textarea {
     background: var(--panel-2);
     border: 1px solid var(--border);
@@ -191,6 +192,29 @@ form textarea {
     width: 100%;
 }
 form textarea { resize: vertical; min-height: 64px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+form select {
+    /* Strip the OS-default chrome; draw our own caret. */
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%2398a2b8' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 10px 6px;
+    padding-right: 28px;
+    cursor: pointer;
+}
+form select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+/* Native option rendering on dark themes is unreliable across OSes —
+   force at least a readable colour scheme. */
+form select option {
+    background: var(--panel);
+    color: var(--text);
+}
 
 .actions {
     display: flex;

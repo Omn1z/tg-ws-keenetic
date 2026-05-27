@@ -61,6 +61,9 @@
         els.statusPill.className   = 'pill ' + (state.listening ? 'pill-on' : 'pill-off');
         els.version.textContent    = state.version ? 'v' + state.version : '';
         els.link.textContent       = state.link || '';
+        // Show the version we already know about right away, so the update
+        // card never renders with an em-dash placeholder.
+        if (state.version) els.updCurrent.textContent = state.version;
 
         renderStats(state.stats);
         fillForm(state.config);
@@ -225,8 +228,9 @@
         }
     }
 
-    els.updCheck.addEventListener('click', async () => {
-        setUpdateResult('Проверяю GitHub…');
+    async function checkForUpdates(opts) {
+        const silent = opts && opts.silent;
+        if (!silent) setUpdateResult('Проверяю GitHub…');
         els.updCheck.disabled = true;
         try {
             const info = await api('GET', '/api/update');
@@ -236,11 +240,20 @@
                 info.available ? '' : 'ok'
             );
         } catch (e) {
-            setUpdateResult('Не удалось проверить: ' + e.message, 'bad');
+            // On initial silent check, do not flag scary errors — the user
+            // hasn't asked us to do anything yet. Manual click still does.
+            if (!silent) {
+                setUpdateResult('Не удалось проверить: ' + e.message, 'bad');
+            } else {
+                els.updLatest.textContent = 'не удалось проверить';
+                els.updLatest.className = '';
+            }
         } finally {
             els.updCheck.disabled = false;
         }
-    });
+    }
+
+    els.updCheck.addEventListener('click', () => checkForUpdates());
 
     els.updApply.addEventListener('click', async () => {
         if (!lastUpdateInfo || !lastUpdateInfo.available) return;
@@ -269,6 +282,10 @@
         }
     });
 
-    refresh();
+    (async function init() {
+        await refresh();
+        // Fire-and-forget: GitHub API call shouldn't block the rest of the UI.
+        checkForUpdates({ silent: true });
+    })();
     setInterval(refresh, 5000);
 })();
