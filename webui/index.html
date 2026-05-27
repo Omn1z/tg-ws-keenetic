@@ -36,6 +36,23 @@
         </section>
     </main>
 
+    <section class="card" id="update-card">
+        <h2>Обновления</h2>
+        <div class="update-row">
+            <div>
+                <div><b>Текущая версия:</b> <span id="update-current">—</span></div>
+                <div><b>Доступна:</b> <span id="update-latest">проверьте</span></div>
+                <div id="update-published" class="muted"></div>
+            </div>
+            <div class="update-actions">
+                <button id="btn-update-check" type="button" class="secondary">Проверить</button>
+                <button id="btn-update-apply" type="button" disabled>Установить</button>
+            </div>
+        </div>
+        <pre id="update-notes" class="release-notes" hidden></pre>
+        <div id="update-result" class="result"></div>
+    </section>
+
     <section class="card">
         <h2>Настройки</h2>
         <form id="cfg" autocomplete="off">
@@ -92,6 +109,19 @@
                 <label>Логин <input name="web_user" type="text" /></label>
                 <label>Пароль (пусто = без авторизации)
                     <input name="web_password" type="password" />
+                </label>
+            </fieldset>
+
+            <fieldset>
+                <legend>Обновления</legend>
+                <label>GitHub-репозиторий
+                    <input name="update_repo" type="text" placeholder="Omn1z/tg-ws-keenetic" />
+                </label>
+                <label>Канал
+                    <select name="update_channel">
+                        <option value="release">release (стабильные теги)</option>
+                        <option value="main">main (последний коммит)</option>
+                    </select>
                 </label>
             </fieldset>
 

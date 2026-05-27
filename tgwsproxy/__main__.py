@@ -25,6 +25,11 @@ from .config import (
 )
 from .logging_setup import configure_logging
 from .server import ProxyServer
+from .updater import (
+    UpdateError,
+    apply_update,
+    check_for_update,
+)
 from .webui import WebUI
 
 log = logging.getLogger("tgwsproxy")
@@ -51,6 +56,18 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     ap.add_argument(
         "--print-link", action="store_true",
         help="Print the tg:// proxy link and exit",
+    )
+    ap.add_argument(
+        "--check-update", action="store_true",
+        help="Check GitHub for a newer version and exit",
+    )
+    ap.add_argument(
+        "--update", action="store_true",
+        help="Download and install the latest release, then exit",
+    )
+    ap.add_argument(
+        "--update-channel", default=None, choices=("release", "main"),
+        help="Override config update_channel for this run",
     )
     ap.add_argument(
         "--version", action="version", version=f"tgwsproxy {__version__}",
@@ -120,11 +137,55 @@ def main(argv: Optional[list] = None) -> int:
         print(proxy_tg_link(cfg))
         return 0
 
+    channel = args.update_channel or cfg.update_channel
+    if args.check_update:
+        return _cmd_check_update(cfg.update_repo, channel)
+    if args.update:
+        return _cmd_apply_update(cfg.update_repo, channel)
+
     log.info("tgwsproxy %s starting (config: %s)", __version__, args.config)
     try:
         asyncio.run(_run(cfg, start_webui=not args.no_webui))
     except KeyboardInterrupt:
         log.info("Interrupted by user")
+    return 0
+
+
+def _cmd_check_update(repo: str, channel: str) -> int:
+    try:
+        info = asyncio.run(check_for_update(repo, channel))
+    except UpdateError as exc:
+        print(f"update check failed: {exc}", file=sys.stderr)
+        return 2
+    print(f"current: {info.current}")
+    print(f"latest:  {info.latest}  ({info.channel})")
+    print(f"update available: {'yes' if info.available else 'no'}")
+    if info.published_at:
+        print(f"published: {info.published_at}")
+    if info.notes:
+        print("\nnotes:")
+        for line in info.notes.splitlines()[:20]:
+            print(f"  {line}")
+    return 0
+
+
+def _cmd_apply_update(repo: str, channel: str) -> int:
+    try:
+        info = asyncio.run(check_for_update(repo, channel))
+    except UpdateError as exc:
+        print(f"update check failed: {exc}", file=sys.stderr)
+        return 2
+    if not info.available:
+        print(f"already at latest ({info.current}); nothing to do")
+        return 0
+    print(f"updating: {info.current} -> {info.latest}")
+    try:
+        script = apply_update(info)
+    except UpdateError as exc:
+        print(f"update failed: {exc}", file=sys.stderr)
+        return 2
+    print(f"apply script spawned: {script}")
+    print("Service will restart in a few seconds; tail /opt/var/log/tgwsproxy/update.log")
     return 0
 
 

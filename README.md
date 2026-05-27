@@ -157,7 +157,57 @@ python3 -m tgwsproxy --init-config           # создать config.json
 python3 -m tgwsproxy --print-link            # вывести tg://proxy ссылку
 python3 -m tgwsproxy --no-webui              # только прокси, без UI
 python3 -m tgwsproxy --config /path.json
+python3 -m tgwsproxy --check-update          # узнать, есть ли новая версия
+python3 -m tgwsproxy --update                # скачать и поставить новую версию
 ```
+
+## Обновления
+
+Прокси умеет сам себя обновлять, забирая релизы прямо с GitHub.
+
+**Из веб-интерфейса**: блок «Обновления» → **Проверить** → **Установить**.
+Сервис остановится, новая версия распакуется в `/opt/share/tgwsproxy/`,
+сервис стартует снова. Старая копия временно сохраняется как `.backup-…`
+рядом — если новая версия не поднимется, applier автоматически откатит
+её обратно. **Конфиг `/opt/etc/tgwsproxy/config.json` не трогается** — все
+ваши настройки сохранятся.
+
+**Из shell** (то же самое, но без UI):
+
+```sh
+ssh root@<router> -p 222 \
+    /opt/bin/python3 -m tgwsproxy --check-update
+ssh root@<router> -p 222 \
+    /opt/bin/python3 -m tgwsproxy --update
+tail -f /opt/var/log/tgwsproxy/update.log
+```
+
+Каналы:
+- `release` (по умолчанию) — берёт последний git tag `vX.Y.Z`. Стабильный.
+- `main` — берёт последний коммит ветки main. Bleeding edge.
+
+Канал и репозиторий настраиваются в Web UI (раздел «Обновления») или в
+`config.json` через поля `update_repo` и `update_channel`.
+
+### Для разработчиков: как выпустить новую версию
+
+В репозитории настроен GitHub Action, который при пуше тега `vX.Y.Z`
+создаёт GitHub Release. Алгоритм:
+
+```sh
+# 1. Обновите версию в коде
+sed -i 's/__version__ = ".*"/__version__ = "1.2.0"/' tgwsproxy/__init__.py
+
+# 2. Коммит и тег
+git add tgwsproxy/__init__.py
+git commit -m "Bump version to 1.2.0"
+git tag v1.2.0
+git push origin main --tags
+```
+
+Action проверит, что версия в `__init__.py` совпадает с тегом, и создаст
+Release с автоматически сгенерированными release notes. После этого все
+пользователи смогут обновиться через Web UI или `--update`.
 
 ## Лицензия
 

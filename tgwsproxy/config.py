@@ -94,6 +94,10 @@ class Config:
     # the IP the router would use for outbound traffic).
     link_host: str = ""
 
+    # Self-update settings
+    update_repo: str = "Omn1z/tg-ws-keenetic"
+    update_channel: str = "release"  # "release" (tag-based) | "main" (rolling)
+
     # Logging
     log_file: str = DEFAULT_LOG_PATH
     log_max_mb: float = 5.0
@@ -140,6 +144,12 @@ class Config:
             errors.append("buffer_size must be >= 4096")
         if self.pool_size < 0:
             errors.append("pool_size must be >= 0")
+        if self.update_channel not in ("release", "main"):
+            errors.append(
+                f"update_channel must be 'release' or 'main', got {self.update_channel!r}"
+            )
+        if self.update_repo and "/" not in self.update_repo:
+            errors.append("update_repo must look like 'owner/name'")
         return errors
 
     def to_dict(self) -> Dict[str, Any]:
@@ -218,6 +228,8 @@ def _from_dict(raw: Dict[str, Any]) -> Config:
         cfproxy_worker_domain=str(merged["cfproxy_worker_domain"]),
         fake_tls_domain=str(merged["fake_tls_domain"]),
         link_host=str(merged["link_host"]),
+        update_repo=str(merged["update_repo"]),
+        update_channel=str(merged["update_channel"]),
         log_file=str(merged["log_file"]),
         log_max_mb=float(merged["log_max_mb"]),
         log_backups=int(merged["log_backups"]),

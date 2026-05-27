@@ -219,3 +219,32 @@ footer {
 code {
     font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
 }
+
+.update-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.update-actions { display: flex; gap: 8px; }
+.update-row b { color: var(--text); font-weight: 500; }
+.update-row #update-latest.has-update { color: var(--ok); font-weight: 600; }
+.update-row #update-latest.up-to-date { color: var(--muted); }
+.release-notes {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 12px 0 0;
+    max-height: 240px;
+    overflow: auto;
+    font-size: 12px;
+    color: var(--muted);
+    white-space: pre-wrap;
+}
+button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+

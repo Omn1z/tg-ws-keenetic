@@ -1,0 +1,52 @@
+name: Release
+
+# Cuts a GitHub Release for every pushed tag that looks like `vX.Y.Z`.
+# The release body is auto-generated from the changelog of merged PRs and
+# commits since the last tag. The tarball GitHub already exposes at
+# /repos/.../tarball/<tag> is what the in-app updater downloads, so we
+# don't need to upload any binaries here.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source at the tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify version in code matches the tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          CODE="$(grep -oE '__version__ = "[^"]+"' tgwsproxy/__init__.py | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "tag=$TAG code=$CODE"
+          if [ "$TAG" != "$CODE" ]; then
+              echo "::error::tag ($TAG) does not match tgwsproxy/__init__.py __version__ ($CODE)"
+              exit 1
+          fi
+
+      - name: Build source tarball
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p dist
+          # Reproducible tarball of only tracked files at this commit.
+          git archive --format=tar.gz --prefix="tg-ws-keenetic-${TAG#v}/" \
+              -o "dist/tg-ws-keenetic-${TAG#v}.tar.gz" "$TAG"
+          ls -la dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz

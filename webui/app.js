@@ -14,7 +14,16 @@
         reload:     $('#reload-cfg'),
         restart:    $('#btn-restart'),
         newSecret:  $('#btn-new-secret'),
+        updCurrent: $('#update-current'),
+        updLatest:  $('#update-latest'),
+        updPublished: $('#update-published'),
+        updNotes:   $('#update-notes'),
+        updResult:  $('#update-result'),
+        updCheck:   $('#btn-update-check'),
+        updApply:   $('#btn-update-apply'),
     };
+
+    let lastUpdateInfo = null;
 
     let lastConfig = null;
 
@@ -186,6 +195,77 @@
             range.selectNode(els.link);
             window.getSelection().removeAllRanges();
             window.getSelection().addRange(range);
+        }
+    });
+
+    function setUpdateResult(text, kind) {
+        els.updResult.textContent = text;
+        els.updResult.className = 'result' + (kind ? ' ' + kind : '');
+    }
+
+    function applyUpdateInfo(info) {
+        lastUpdateInfo = info;
+        els.updCurrent.textContent = info.current || '—';
+        if (info.available) {
+            els.updLatest.textContent = `${info.latest} (${info.channel})`;
+            els.updLatest.className = 'has-update';
+            els.updApply.disabled = false;
+        } else {
+            els.updLatest.textContent = `${info.latest} — актуальна`;
+            els.updLatest.className = 'up-to-date';
+            els.updApply.disabled = true;
+        }
+        els.updPublished.textContent = info.published_at
+            ? `опубликовано: ${info.published_at}` : '';
+        if (info.notes) {
+            els.updNotes.textContent = info.notes;
+            els.updNotes.hidden = false;
+        } else {
+            els.updNotes.hidden = true;
+        }
+    }
+
+    els.updCheck.addEventListener('click', async () => {
+        setUpdateResult('Проверяю GitHub…');
+        els.updCheck.disabled = true;
+        try {
+            const info = await api('GET', '/api/update');
+            applyUpdateInfo(info);
+            setUpdateResult(
+                info.available ? 'Доступна новая версия' : 'У вас актуальная версия',
+                info.available ? '' : 'ok'
+            );
+        } catch (e) {
+            setUpdateResult('Не удалось проверить: ' + e.message, 'bad');
+        } finally {
+            els.updCheck.disabled = false;
+        }
+    });
+
+    els.updApply.addEventListener('click', async () => {
+        if (!lastUpdateInfo || !lastUpdateInfo.available) return;
+        if (!confirm(
+            `Обновиться с ${lastUpdateInfo.current} до ${lastUpdateInfo.latest}? ` +
+            'Сервис будет перезапущен. Конфигурация сохранится.'
+        )) return;
+        setUpdateResult('Скачиваю обновление…');
+        els.updApply.disabled = true;
+        try {
+            const res = await api('POST', '/api/update');
+            if (res.applied) {
+                setUpdateResult(
+                    `Обновление ${res.from} → ${res.to} запущено. ` +
+                    'Через 5–10 секунд сервис перезапустится.',
+                    'ok'
+                );
+                setTimeout(() => location.reload(), 12000);
+            } else {
+                setUpdateResult(res.reason || 'Нет обновлений', 'ok');
+                els.updApply.disabled = false;
+            }
+        } catch (e) {
+            setUpdateResult('Ошибка установки: ' + e.message, 'bad');
+            els.updApply.disabled = false;
         }
     });
 

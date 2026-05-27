@@ -34,6 +34,11 @@ from .config import (
     save_config,
 )
 from .server import ProxyServer
+from .updater import (
+    UpdateError,
+    apply_update_async,
+    check_for_update,
+)
 
 log = logging.getLogger("tgwsproxy.webui")
 
@@ -81,6 +86,8 @@ class WebUI:
             ("POST", "/api/config"): self._handle_save_config,
             ("POST", "/api/restart"): self._handle_restart,
             ("POST", "/api/secret"): self._handle_new_secret,
+            ("GET", "/api/update"): self._handle_update_check,
+            ("POST", "/api/update"): self._handle_update_apply,
         }
 
     async def start(self) -> None:
@@ -230,6 +237,46 @@ class WebUI:
         save_config(cfg, self._config_path)
         asyncio.create_task(self._restart_proxy_quiet())
         return _json_ok({"secret": cfg.secret})
+
+    async def _handle_update_check(self, request: _HttpRequest):
+        cfg = self._proxy.config
+        try:
+            info = await check_for_update(
+                cfg.update_repo, cfg.update_channel
+            )
+        except UpdateError as exc:
+            return _json_error(502, str(exc))
+        return _json_ok(info.as_dict())
+
+    async def _handle_update_apply(self, request: _HttpRequest):
+        cfg = self._proxy.config
+        try:
+            info = await check_for_update(
+                cfg.update_repo, cfg.update_channel
+            )
+        except UpdateError as exc:
+            return _json_error(502, str(exc))
+
+        if not info.available:
+            return _json_ok({
+                "applied": False,
+                "reason": f"already at latest ({info.current})",
+                "info": info.as_dict(),
+            })
+
+        try:
+            script = await apply_update_async(info)
+        except UpdateError as exc:
+            return _json_error(500, str(exc))
+
+        # The apply script will stop & restart the service in ~3 seconds.
+        return _json_ok({
+            "applied": True,
+            "from": info.current,
+            "to": info.latest,
+            "script": str(script),
+            "info": info.as_dict(),
+        })
 
     async def _restart_proxy_quiet(self) -> None:
         try:
