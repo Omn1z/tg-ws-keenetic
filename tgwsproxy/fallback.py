@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 
 from .balancer import balancer
 from .bridge import MessageSplitter, bridge_tcp, bridge_ws
-from .constants import DC_DEFAULT_IPS
+from .constants import DC_DEFAULT_IPS, DC_TEST_IPS
 from .crypto import ReencryptionContext
 from .stats import Stats
 from .websocket import RawWebSocket
@@ -46,12 +46,14 @@ async def attempt_fallback(
     stats: Stats,
     cfg: FallbackConfig,
     splitter: Optional[MessageSplitter] = None,
+    is_test_dc: bool = False,
 ) -> bool:
     """Try each enabled fallback in order. Returns True if one took over."""
-    target_ip = DC_DEFAULT_IPS.get(dc)
+    ip_table = DC_TEST_IPS if is_test_dc else DC_DEFAULT_IPS
+    target_ip = ip_table.get(dc)
     media_tag = " media" if is_media else ""
 
-    if cfg.cfproxy_worker_domain and target_ip:
+    if cfg.cfproxy_worker_domain and target_ip and not is_test_dc:
         if await _cfworker(
             client_reader,
             client_writer,
@@ -67,7 +69,7 @@ async def attempt_fallback(
         ):
             return True
 
-    if cfg.cfproxy_enabled:
+    if cfg.cfproxy_enabled and not is_test_dc:
         if await _cfproxy(
             client_reader,
             client_writer,

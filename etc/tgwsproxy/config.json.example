@@ -11,6 +11,7 @@
   "buffer_size": 262144,
   "pool_size": 4,
   "proxy_protocol": false,
+  "force_test_dc": false,
   "cfproxy": true,
   "cfproxy_user_domain": "",
   "cfproxy_worker_domain": "",
