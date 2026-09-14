@@ -43,6 +43,17 @@ DC_DEFAULT_IPS = {
     203: "91.105.192.100",
 }
 
+# Telegram TEST datacenter IPs (used when force_test_dc is enabled or a
+# client signals a test DC as plain 1-3).
+DC_TEST_IPS = {
+    1: "149.154.175.10",
+    2: "149.154.167.40",
+    3: "149.154.175.117",
+}
+
+WS_PATH = "/apiws"
+WS_PATH_TEST = WS_PATH + "_test"
+
 # Valid DC numbers we route to.
 DC_IDS = (1, 2, 3, 4, 5, 203)
 

@@ -131,6 +131,7 @@ ssh -L 1434:127.0.0.1:1434 root@<router>
 | `cfproxy_worker_domain` | str | Свой CF Worker URL (пробуется первым) |
 | `fake_tls_domain` | str | SNI для Fake-TLS маскировки; пусто = выкл. |
 | `proxy_protocol` | bool | Принимать PROXY protocol v1 (если за nginx/haproxy) |
+| `force_test_dc` | bool | Форсировать ВСЕ соединения на Telegram TEST датацентры |
 | `log_file`, `log_max_mb`, `log_backups` | | Ротация логов |
 | `verbose` | bool | DEBUG-логи (шумно) |
 | `web_user`, `web_password` | str | Basic Auth для веб-UI; пустой пароль = выкл. |

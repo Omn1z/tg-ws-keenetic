@@ -1,8 +1,9 @@
 """Minimal RFC 6455 WebSocket client over TLS.
 
 We only implement what the bridge needs: binary frames, masked client→server,
-ping/pong handling, clean close. There is no fragmentation support — the
-upstream Telegram WS endpoint never fragments.
+ping/pong handling, fragmented message reassembly, clean close. The upstream
+Telegram WS endpoint never fragments, but some fallback paths do, so inbound
+messages are reassembled across continuation frames.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from .constants import (
     WS_MASK_BIT,
     WS_OP_BINARY,
     WS_OP_CLOSE,
+    WS_OP_CONT,
     WS_OP_PING,
     WS_OP_PONG,
     WS_OP_TEXT,
@@ -83,10 +85,13 @@ def _xor_mask(data: bytes, mask: bytes) -> bytes:
     ).to_bytes(n, "big")
 
 
+MAX_MESSAGE_LEN = 16 * 1024 * 1024
+
+
 class RawWebSocket:
     """Bare-bones client. One stream in, one stream out, no threads."""
 
-    __slots__ = ("reader", "writer", "_closed")
+    __slots__ = ("reader", "writer", "_closed", "_frag")
 
     def __init__(
         self,
@@ -96,6 +101,7 @@ class RawWebSocket:
         self.reader = reader
         self.writer = writer
         self._closed = False
+        self._frag = bytearray()
 
     @property
     def closed(self) -> bool:
@@ -192,7 +198,7 @@ class RawWebSocket:
     async def recv(self) -> Optional[bytes]:
         """Block until a binary/text frame, return its payload. None on close."""
         while not self._closed:
-            opcode, payload = await self._read_frame()
+            opcode, payload, fin = await self._read_frame()
 
             if opcode == WS_OP_CLOSE:
                 self._closed = True
@@ -218,8 +224,21 @@ class RawWebSocket:
             if opcode == WS_OP_PONG:
                 continue
 
-            if opcode in (WS_OP_TEXT, WS_OP_BINARY):
-                return payload
+            # Data frames (text/binary) plus continuation frames. Reassemble
+            # fragmented messages so the caller always sees a whole payload.
+            if opcode in (WS_OP_CONT, WS_OP_TEXT, WS_OP_BINARY):
+                if fin and not self._frag:
+                    return payload
+                self._frag.extend(payload)
+                if len(self._frag) > MAX_MESSAGE_LEN:
+                    raise ConnectionError(
+                        f"WS message too large: {len(self._frag)} bytes"
+                    )
+                if not fin:
+                    continue
+                message = bytes(self._frag)
+                self._frag.clear()
+                return message
         return None
 
     async def close(self) -> None:
@@ -252,19 +271,22 @@ class RawWebSocket:
             )
         return _HEAD_BBQ4.pack(flags, WS_MASK_BIT | 127, length, mask) + masked
 
-    async def _read_frame(self) -> Tuple[int, bytes]:
+    async def _read_frame(self) -> Tuple[int, bytes, bool]:
         header = await self.reader.readexactly(2)
+        fin = bool(header[0] & WS_FIN_BIT)
         opcode = header[0] & 0x0F
         length = header[1] & 0x7F
         if length == 126:
             length = _UNPACK_H.unpack(await self.reader.readexactly(2))[0]
         elif length == 127:
             length = _UNPACK_Q.unpack(await self.reader.readexactly(8))[0]
+        if length > MAX_MESSAGE_LEN:
+            raise ConnectionError(f"WS frame too large: {length} bytes")
 
         if header[1] & WS_MASK_BIT:
             mask = await self.reader.readexactly(4)
             payload = await self.reader.readexactly(length)
-            return opcode, _xor_mask(payload, mask)
+            return opcode, _xor_mask(payload, mask), fin
 
         payload = await self.reader.readexactly(length)
-        return opcode, payload
+        return opcode, payload, fin
