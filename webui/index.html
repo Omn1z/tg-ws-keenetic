@@ -1,143 +1,17 @@
 <!doctype html>
 <html lang="ru">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>TG WS Proxy &mdash; Keenetic</title>
-    <link rel="stylesheet" href="/style.css" />
-</head>
-<body>
-<div class="app">
-    <header class="topbar">
-        <h1>TG WS Proxy <span class="hint">для Keenetic Entware</span></h1>
-        <div class="meta">
-            <span id="status-pill" class="pill pill-off">offline</span>
-            <span id="version" class="muted"></span>
-        </div>
-    </header>
-
-    <main class="grid">
-        <section class="card">
-            <h2>Подключение к Telegram</h2>
-            <p class="muted">Скопируйте ссылку или отсканируйте QR на устройстве с Telegram.</p>
-            <div class="link-box">
-                <code id="link"></code>
-                <button id="copy-link" type="button">Скопировать</button>
-            </div>
-            <div class="quick">
-                <button id="btn-restart" type="button" class="secondary">Перезапустить прокси</button>
-                <button id="btn-new-secret" type="button" class="danger">Новый секрет</button>
-            </div>
-        </section>
-
-        <section class="card">
-            <h2>Статистика</h2>
-            <ul id="stats" class="stats"></ul>
-        </section>
-    </main>
-
-    <section class="card" id="update-card">
-        <h2>Обновления</h2>
-        <div class="update-row">
-            <div>
-                <div><b>Текущая версия:</b> <span id="update-current">—</span></div>
-                <div><b>Доступна:</b> <span id="update-latest">проверьте</span></div>
-                <div id="update-published" class="muted"></div>
-            </div>
-            <div class="update-actions">
-                <button id="btn-update-check" type="button" class="secondary">Проверить</button>
-                <button id="btn-update-apply" type="button" disabled>Установить</button>
-            </div>
-        </div>
-        <pre id="update-notes" class="release-notes" hidden></pre>
-        <div id="update-result" class="result"></div>
-    </section>
-
-    <section class="card">
-        <h2>Настройки</h2>
-        <form id="cfg" autocomplete="off">
-            <fieldset>
-                <legend>Сетевые порты</legend>
-                <label>Хост прокси <input name="host" type="text" /></label>
-                <label>Порт прокси <input name="port" type="number" min="1" max="65535" /></label>
-                <label>Хост веб-интерфейса <input name="web_host" type="text" /></label>
-                <label>Порт веб-интерфейса <input name="web_port" type="number" min="1" max="65535" /></label>
-                <label>Хост в ссылке tg:// (пусто = взять из адреса этой страницы)
-                    <input name="link_host" type="text" placeholder="192.168.3.1" />
-                </label>
-            </fieldset>
-
-            <fieldset>
-                <legend>MTProto</legend>
-                <label>Secret (32 hex)
-                    <div class="row">
-                        <input name="secret" type="text" maxlength="32" />
-                    </div>
-                </label>
-                <label>Маршруты к ЦОД
-                    <textarea name="dc_redirects" rows="3" placeholder="2: 149.154.167.220&#10;4: 149.154.167.220"></textarea>
-                </label>
-            </fieldset>
-
-            <fieldset>
-                <legend>Fake TLS &amp; Cloudflare fallback</legend>
-                <label>Fake-TLS домен (SNI; пусто = выкл.)
-                    <input name="fake_tls_domain" type="text" placeholder="example.com" />
-                </label>
-                <label><input name="cfproxy" type="checkbox" /> Использовать публичный пул CF-доменов</label>
-                <label>Пользовательский CF-домен
-                    <input name="cfproxy_user_domain" type="text" placeholder="my.example.com" />
-                </label>
-                <label>CF Worker домен
-                    <input name="cfproxy_worker_domain" type="text" placeholder="my-worker.workers.dev" />
-                </label>
-            </fieldset>
-
-            <fieldset>
-                <legend>Производительность и логи</legend>
-                <label>Размер сокет-буфера, байт <input name="buffer_size" type="number" min="4096" /></label>
-                <label>Размер WS-пула на DC <input name="pool_size" type="number" min="0" /></label>
-                <label>Файл логов <input name="log_file" type="text" /></label>
-                <label>Размер ротации, MB <input name="log_max_mb" type="number" min="0.5" step="0.5" /></label>
-                <label>Кол-во ротированных файлов <input name="log_backups" type="number" min="0" /></label>
-                <label><input name="verbose" type="checkbox" /> Подробное логирование (DEBUG)</label>
-                <label><input name="proxy_protocol" type="checkbox" /> PROXY protocol v1 (за nginx/haproxy)</label>
-            </fieldset>
-
-            <fieldset>
-                <legend>Веб-интерфейс — авторизация</legend>
-                <label>Логин <input name="web_user" type="text" /></label>
-                <label>Пароль (пусто = без авторизации)
-                    <input name="web_password" type="password" />
-                </label>
-            </fieldset>
-
-            <fieldset>
-                <legend>Обновления</legend>
-                <label>GitHub-репозиторий
-                    <input name="update_repo" type="text" placeholder="Omn1z/tg-ws-keenetic" />
-                </label>
-                <label>Канал
-                    <select name="update_channel">
-                        <option value="release">release (стабильные теги)</option>
-                        <option value="main">main (последний коммит)</option>
-                    </select>
-                </label>
-            </fieldset>
-
-            <div class="actions">
-                <button type="submit">Сохранить и перезапустить</button>
-                <button type="button" id="reload-cfg" class="secondary">Отменить</button>
-                <span id="save-result" class="result"></span>
-            </div>
-        </form>
-    </section>
-
-    <footer class="muted">
-        Конфигурация хранится в <code>/opt/etc/tgwsproxy/config.json</code> &mdash;
-        изменения через этот веб-интерфейс перезапишут файл.
-    </footer>
-</div>
-<script src="/app.js"></script>
-</body>
-</html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>TG WS · Router</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><main>
+<header><div class="brand"><span class="mark">↗</span><div><h1>TG WS <span>RUST</span></h1><p>Telegram через ваш роутер</p></div></div><div class="status"><i id="led"></i><span id="status">Подключение…</span><small id="version"></small></div></header>
+<section class="connect"><div><span class="eyebrow">ПОДКЛЮЧЕНИЕ</span><h2>Подключите Telegram</h2><p>Откройте ссылку на устройстве в сети роутера.</p></div><a id="open" class="button" aria-disabled="true">Открыть Telegram ↗</a><div class="link"><code id="link">Загрузка…</code><button id="copy" class="quiet">Копировать</button></div></section>
+<div class="metrics" aria-live="off"><article><span>Сейчас подключено</span><b id="active">—</b><small id="total">—</small></article><article><span>Отправлено</span><b id="up">—</b><small>через прокси</small></article><article><span>Получено</span><b id="down">—</b><small>через прокси</small></article><article><span>Время работы</span><b id="uptime">—</b><small id="routes">—</small></article></div>
+<div class="section-title"><h2>Настройки</h2><button id="restart" class="quiet">Перезапустить прокси</button></div>
+<form id="settings" autocomplete="off"><fieldset id="fields" disabled>
+<div class="form-grid"><label>Порт прокси<input name="port" type="number" min="1" max="65535" required></label><label>Адрес в ссылке<input name="link_host" placeholder="Автоматически: IP этой страницы"></label><label>Лимит подключений<input name="max_connections" type="number" min="1" max="1024" required></label><label>Буфер потока<select name="buffer_size"><option value="4096">4 КиБ · экономный</option><option value="16384">16 КиБ · стандартный</option><option value="32768">32 КиБ</option><option value="65536">64 КиБ</option><option value="131072">128 КиБ</option><option value="262144">256 КиБ</option></select></label><label>Прогретых соединений на DC<select name="pool_size"><option value="0">0 · минимум памяти</option><option value="1">1 · быстрее подключение</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label><label>Fake TLS: домен<input name="fake_tls_domain" placeholder="Выключен"></label></div>
+<details><summary>Маршруты и дополнительные параметры</summary><div class="form-grid advanced"><label>DC → IP <small>Одна запись на строку, например 4:149.154.167.220</small><textarea name="dc_redirects" rows="4" spellcheck="false"></textarea></label><label>CF proxy домены <small>По одному имени на строку, без https://</small><textarea name="cfproxy_user_domains" rows="4" spellcheck="false"></textarea></label><label>CF Worker домены <small>По одному имени на строку, без https://</small><textarea name="cfproxy_worker_domains" rows="4" spellcheck="false"></textarea></label><div class="checks"><label><input name="cfproxy" type="checkbox"> Резервные CF proxy</label><label><input name="domain_refresh" type="checkbox"> Обновлять список доменов раз в час</label><label><input name="sni_fronting" type="checkbox"> SNI fronting</label><label><input name="force_test_dc" type="checkbox"> Тестовые DC Telegram</label><label><input name="proxy_protocol" type="checkbox"> PROXY protocol v1 перед MTProto</label></div><label>Таймаут подключения, с<input name="connect_timeout_secs" type="number" min="1" max="60"></label><label>Таймаут без трафика, с<input name="idle_timeout_secs" type="number" min="10" max="86400"></label></div></details>
+<details><summary>Доступ к панели</summary><div class="form-grid advanced"><label>Имя пользователя<input name="web_user" autocomplete="username" maxlength="128"></label><label>Новый пароль<input name="web_password" type="password" autocomplete="new-password" placeholder="Оставьте пустым, чтобы сохранить" maxlength="256"></label></div><p id="auth-note" class="muted"></p><label class="check"><input id="clear-password" type="checkbox"> Убрать пароль панели</label><p class="muted">Панель: 1434 по умолчанию. Адрес и порт панели меняются в файле конфигурации с перезапуском сервиса.</p></details>
+<div class="actions"><button type="submit">Сохранить и применить</button><button id="new-secret" type="button" class="quiet danger">Сменить секрет</button><span class="muted">Применение переподключит клиентов.</span></div>
+</fieldset></form><p id="notice" role="status" aria-live="polite"></p>
+<details class="install"><summary>Установка и обновление</summary><p>Выполните через SSH на OpenWrt или Keenetic с Entware. Установщик выберет архитектуру и последний релиз, проверит SHA-256 и сохранит настройки.</p><pre><code>curl -fL https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh -o /tmp/tgws-install.sh &amp;&amp; sh /tmp/tgws-install.sh</code></pre><p>Если curl отсутствует, используйте <code>wget -O /tmp/tgws-install.sh URL</code> с тем же адресом. Для обновления повторите команду. <a href="https://github.com/Omn1z/tg-ws-keenetic/releases" target="_blank" rel="noopener noreferrer">Релизы ↗</a></p></details>
+<footer><span>Один процесс. Встроенная панель. Без Python.</span><span id="upstream">Flowseal TG WS</span></footer>
+</main></body></html>

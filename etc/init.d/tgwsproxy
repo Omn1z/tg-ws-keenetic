@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+# Native OpenWrt service, supervised by procd.
+START=99
+STOP=10
+USE_PROCD=1
+start_service() {
+    /usr/bin/tgwsproxy --config /etc/tgwsproxy/config.json --check-config || return 1
+    procd_open_instance
+    procd_set_param command /usr/bin/tgwsproxy --config /etc/tgwsproxy/config.json
+    procd_set_param respawn 3600 5 5
+    procd_set_param file /etc/tgwsproxy/config.json
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param term_timeout 10
+    procd_close_instance
+}
+reload_service() {
+    stop
+    start
+}

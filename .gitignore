@@ -29,3 +29,6 @@ _reference/
 _stub_check*/
 _dev_*.py
 _probe*.py
+
+# Rust
+/target/

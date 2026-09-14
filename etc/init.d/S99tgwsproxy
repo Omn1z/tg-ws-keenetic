@@ -1,115 +1,45 @@
 #!/bin/sh
-# Entware init script for tgwsproxy.
-# Drop into /opt/etc/init.d/ and chmod +x.
-
-ENABLED=yes
-DESC="Telegram MTProto-over-WebSocket proxy"
-PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/sbin:/bin:/usr/sbin:/usr/bin
-
-EXEC=/opt/bin/python3
-ARGS="-m tgwsproxy --config /opt/etc/tgwsproxy/config.json"
-WORKDIR=/opt/share/tgwsproxy
+# Entware service; one foreground process, RAM-backed startup/error log.
+PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+BIN=/opt/bin/tgwsproxy
+CONFIG=/opt/etc/tgwsproxy/config.json
 PIDFILE=/opt/var/run/tgwsproxy.pid
-LOGDIR=/opt/var/log/tgwsproxy
-SSD=/opt/sbin/start-stop-daemon
-
-mkdir -p /opt/var/run "$LOGDIR" /opt/etc/tgwsproxy
-
-# Pick a daemonizer that exists on this system. start-stop-daemon ships with
-# Entware and is the cleanest option; fall back to a plain shell backgrounding
-# trick if it's missing.
-_spawn() {
-    if [ -x "$SSD" ]; then
-        "$SSD" -S -b -m -p "$PIDFILE" \
-            -d "$WORKDIR" \
-            -O "$LOGDIR/stdout.log" \
-            -x "$EXEC" -- $ARGS
-    else
-        cd "$WORKDIR" || return 1
-        ( "$EXEC" $ARGS >> "$LOGDIR/stdout.log" 2>&1 ) &
-        echo $! > "$PIDFILE"
-    fi
+LOGFILE=/tmp/tgwsproxy.log
+umask 077
+running() {
+    [ -f "$PIDFILE" ] || return 1
+    pid=$(cat "$PIDFILE" 2>/dev/null)
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$pid" -gt 1 ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    executable=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+    [ "$executable" = "$BIN" ] || [ "$executable" = "$BIN (deleted)" ]
 }
-
-_running() {
-    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
-}
-
 start() {
-    if _running; then
-        echo "$DESC: already running (PID $(cat "$PIDFILE"))"
-        return 0
-    fi
-    echo "Starting $DESC..."
-    if [ ! -x "$EXEC" ]; then
-        echo "ERROR: $EXEC not found — opkg install python3"
-        return 1
-    fi
-    if [ ! -d "$WORKDIR/tgwsproxy" ]; then
-        echo "ERROR: $WORKDIR/tgwsproxy missing — is tgwsproxy installed?"
-        return 1
-    fi
-    _spawn
-    # Give it a moment, then verify.
+    running && { echo "tgwsproxy running (PID $pid)"; return 0; }
+    [ -x "$BIN" ] || { echo "Missing $BIN" >&2; return 1; }
+    "$BIN" --config "$CONFIG" --check-config || return 1
+    mkdir -p /opt/var/run
+    rm -f "$PIDFILE"
+    "$BIN" --config "$CONFIG" > "$LOGFILE" 2>&1 </dev/null &
+    printf '%s\n' "$!" > "$PIDFILE"
     sleep 1
-    if _running; then
-        echo "$DESC started (PID $(cat "$PIDFILE"))"
-    else
-        echo "ERROR: $DESC failed to start; see $LOGDIR/stdout.log"
-        rm -f "$PIDFILE"
-        return 1
-    fi
+    running || { echo "Startup failed; see $LOGFILE" >&2; rm -f "$PIDFILE"; return 1; }
+    echo "tgwsproxy started (PID $pid)"
 }
-
 stop() {
-    if ! _running; then
-        echo "$DESC: not running"
-        rm -f "$PIDFILE"
-        return 0
-    fi
-    PID=$(cat "$PIDFILE")
-    echo "Stopping $DESC (PID $PID)..."
-    if [ -x "$SSD" ]; then
-        "$SSD" -K -q -p "$PIDFILE" -x "$EXEC"
-    else
-        kill -TERM "$PID" 2>/dev/null
-    fi
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        kill -0 "$PID" 2>/dev/null || break
-        sleep 1
-    done
-    if kill -0 "$PID" 2>/dev/null; then
-        echo "Process did not exit; sending KILL"
-        kill -KILL "$PID" 2>/dev/null
+    if running; then
+        kill -TERM "$pid" 2>/dev/null || return 1
+        count=0
+        while running && [ "$count" -lt 10 ]; do sleep 1; count=$((count + 1)); done
+        if running; then kill -KILL "$pid" 2>/dev/null || return 1; fi
     fi
     rm -f "$PIDFILE"
-    echo "$DESC stopped"
 }
-
-status() {
-    if _running; then
-        echo "$DESC is running (PID $(cat "$PIDFILE"))"
-        return 0
-    fi
-    echo "$DESC is NOT running"
-    return 1
-}
-
-restart() {
-    stop
-    sleep 1
-    start
-}
-
-case "$1" in
-    start)   start ;;
-    stop)    stop ;;
-    restart) restart ;;
-    status)  status ;;
-    check)   status ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status}"
-        exit 1
-        ;;
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop && start ;;
+    status|check) if running; then echo "tgwsproxy running (PID $pid)"; else echo "tgwsproxy stopped"; exit 1; fi ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
 esac
-exit $?

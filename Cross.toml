@@ -1,0 +1,24 @@
+# MIPS has no distributed rust-std: build it with pinned nightly + rust-src.
+# Use the current cross toolchain images; each CI job records its resolved digest.
+[build.env]
+passthrough = ["RUSTFLAGS", "SOURCE_DATE_EPOCH"]
+
+[target.mips-unknown-linux-musl]
+image = "ghcr.io/cross-rs/mips-unknown-linux-musl:main"
+build-std = ["std", "panic_abort"]
+
+[target.mipsel-unknown-linux-musl]
+image = "ghcr.io/cross-rs/mipsel-unknown-linux-musl:main"
+build-std = ["std", "panic_abort"]
+
+[target.armv5te-unknown-linux-musleabi]
+image = "ghcr.io/cross-rs/armv5te-unknown-linux-musleabi:main"
+
+[target.armv7-unknown-linux-musleabi]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabi:main"
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
+
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"

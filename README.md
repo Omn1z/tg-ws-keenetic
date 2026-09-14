@@ -1,214 +1,192 @@
-# tgwsproxy для Keenetic Entware
+# TG WS Proxy · Rust для OpenWrt / Keenetic
 
-Telegram MTProto → WebSocket прокси, который запускается **прямо на роутере**
-(Keenetic с Entware, ARM/MIPS). Никаких ПК, никаких облачных VPS — Telegram
-с любого устройства в LAN ходит через `<router-ip>:1433`, а настройка
-делается из браузера на `http://<router-ip>:1434/`.
+MTProto → WebSocket прокси Telegram **на самом роутере**. Один нативный бинарник
+со встроенной небольшой веб-панелью. Не нужны Python, Node.js, Git или компилятор
+на роутере. Ветка `rust` заменяет прежнюю реализацию на Python.
 
-Форк-переписывание [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy):
-тот же протокол, та же crypto-схема, но без GUI/tray, без Windows-специфики,
-с раздельной структурой модулей и web UI вместо системного трея.
+Сетевой протокол перенесён из [Flowseal/tg-ws-proxy v1.10.2](https://github.com/Flowseal/tg-ws-proxy/tree/v1.10.2),
+коммит `f200e33fd283143a9f101d62aaf9d8c1468a23fe` от 7 сентября 2026 года.
+На 14 сентября это последний релиз и HEAD upstream. Для сверки также использованы
+наработки [NFQWS2 Strategy Selector](https://github.com/Omn1z/nfqws2-keenetic-strategy-selector).
+Это самостоятельный сервис: NFQWS2 для его запуска не требуется.
 
-## Что в комплекте
+## Установка последнего релиза
 
-- `tgwsproxy/` — Python-пакет (≈ 1300 строк, разбито на 14 модулей)
-- `webui/` — статический фронтенд (HTML + CSS + JS, без сборщиков)
-- `etc/init.d/S99tgwsproxy` — init-скрипт Entware
-- `scripts/install.sh`, `scripts/uninstall.sh` — установка/удаление
-- `etc/tgwsproxy/config.json.example` — пример конфига
-
-## Что важно знать
-
-| Параметр | Значение по умолчанию | Комментарий |
-|---|---|---|
-| Порт прокси | `1433` | привязан к `0.0.0.0`, доступен с LAN |
-| Порт веб-UI | `1434` | привязан к `0.0.0.0`, можно ограничить логином/паролем |
-| Конфиг | `/opt/etc/tgwsproxy/config.json` | редактируется через web UI |
-| Логи | `/opt/var/log/tgwsproxy/` | с авто-ротацией |
-| Код | `/opt/share/tgwsproxy/` | обновляется через `scripts/install.sh` |
-| Зависимости | `python3`, `python3-cryptography` | оба ставятся через `opkg` |
-
-## Установка
-
-На роутере с Entware (через SSH):
+Через SSH **от root** на OpenWrt или Keenetic с уже установленным Entware:
 
 ```sh
-# 1) Зависимости (если ещё не стоят)
-opkg update
-opkg install python3 python3-cryptography git
-
-# 2) Получить код
-cd /opt/tmp
-git clone https://github.com/<your-fork>/tg-ws-keenetic.git
-cd tg-ws-keenetic
-
-# 3) Установить
-sh scripts/install.sh
+curl -fL https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh -o /tmp/tgws-install.sh && sh /tmp/tgws-install.sh
 ```
 
-Скрипт:
-
-1. Проверит, что Python и `cryptography` установлены.
-2. Скопирует код в `/opt/share/tgwsproxy/`.
-3. Положит init-скрипт в `/opt/etc/init.d/S99tgwsproxy`.
-4. Сгенерирует дефолтный `config.json` (с уникальным secret), если его нет.
-5. Запустит сервис.
-
-После установки откройте `http://<router-ip>:1434/` — увидите статус,
-ссылку для Telegram и форму настроек.
-
-## Управление сервисом
+Или с `wget`:
 
 ```sh
-/opt/etc/init.d/S99tgwsproxy start
-/opt/etc/init.d/S99tgwsproxy stop
+wget -O /tmp/tgws-install.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh && sh /tmp/tgws-install.sh
+```
+
+**Для этой команды нужен опубликованный Rust-релиз с `install.sh` и бинарными
+архивами.** Пока изменения находятся только в ветке `rust`, старый Python-релиз
+этих файлов не содержит. Порядок выпуска — ниже; публикация не происходит при
+обычном коммите или пуше ветки.
+
+После установки: **`http://<IP-роутера>:1434/`** → **«Открыть Telegram»**.
+Прокси слушает **1433/TCP**. Используйте LAN-адрес роутера. Проброс портов в WAN
+не нужен. Установщик выбирает архитектуру, сверяет SHA-256, создаёт случайный
+секрет, подключает автозапуск и сохраняет существующий конфиг при обновлении.
+Для обновления достаточно повторить команду.
+
+| Система | Бинарник | Конфигурация | Сервис |
+|---|---|---|---|
+| Keenetic / Entware | `/opt/bin/tgwsproxy` | `/opt/etc/tgwsproxy/config.json` | `/opt/etc/init.d/S99tgwsproxy` |
+| OpenWrt | `/usr/bin/tgwsproxy` | `/etc/tgwsproxy/config.json` | `/etc/init.d/tgwsproxy` (procd) |
+
+Если на OpenWrt одновременно установлен Entware, укажите систему явно:
+`sh /tmp/tgws-install.sh --system openwrt` или `--system entware`.
+Подробности, установка выбранной версии, локального бинарника и удаление —
+[INSTALL.md](INSTALL.md).
+
+## Что изменилось
+
+- **Rust и один асинхронный цикл Tokio.** Отдельного процесса для панели нет;
+  DNS использует не более двух вспомогательных потоков Tokio со стеком 256 КиБ;
+  неактивные потоки освобождаются через 10 секунд.
+- **Ограниченная память на поток.** Два буфера по 16 КиБ по умолчанию; MTProto
+  передаётся частями без накопления полного сообщения, даже для больших медиа.
+  У TLS, Fake TLS, ОС и задач есть дополнительные расходы памяти.
+- **AES-256-CTR на месте.** Обфускация снимается и накладывается в одном буфере.
+  Содержимое MTProto остаётся зашифрованным Telegram. Третий AES-проход для
+  определения границ пакетов не нужен.
+- **Пул по требованию.** По умолчанию `pool_size=0`: нет заранее открытых WS.
+  Можно включить до четырёх прогретых соединений на каждый DC/тип трафика.
+- **Лимит 64 клиента**, ограниченные HTTP/WS-заголовки, таймауты и отмена задач
+  при перезапуске. Счётчики трафика 64-битные и работают на 32-битном MIPS.
+- **Небольшая панель**: ссылка Telegram, трафик, настройки, секрет, пароль и
+  перезапуск. Без CDN, шрифтов, графических библиотек, npm и фоновой проверки
+  обновлений GitHub на каждом открытии. Опрос раз в 5 секунд, только в видимой вкладке.
+- **Актуальные маршруты**: media DC, автоматические/принудительные тестовые DC,
+  `/apiws_test`, CF proxy/Worker списки, резервный TCP, SNI fronting, обновление
+  резервных доменов раз в час, восстановление пула и задержки повторных попыток.
+- **Fake TLS**, PROXY protocol v1, WebSocket continuation, ping/pong,
+  проверка HTTP Upgrade и потоковое маскирование кадров.
+
+Границы переноса и отличия от upstream описаны в [docs/UPSTREAM.md](docs/UPSTREAM.md).
+
+## Слабые роутеры и архитектуры
+
+Релизный workflow собирает статические musl-бинарники:
+
+| Архив | Целевая архитектура |
+|---|---|
+| `tgwsproxy-mipsel.tar.gz` | MIPS32r2, little endian, soft float — многие Keenetic |
+| `tgwsproxy-mips.tar.gz` | MIPS32r2, big endian, soft float — OpenWrt |
+| `tgwsproxy-arm.tar.gz` | ARMv5TE и новее, soft float |
+| `tgwsproxy-armv7.tar.gz` | ARMv7, soft float |
+| `tgwsproxy-aarch64.tar.gz` | ARM64 |
+| `tgwsproxy-x86_64.tar.gz` | x86-64 |
+
+**MIPS32r1 и устройства без Linux/Entware не поддерживаются.** Одинаковое имя
+архитектуры не гарантирует совместимость со всеми старыми ядрами. Перед публикацией
+workflow проверяет ELF на отсутствие динамических зависимостей, запускает бинарник
+под QEMU и проверяет конфигурацию. Это не заменяет проверку на физическом роутере.
+
+На устройствах с небольшим объёмом RAM начните с:
+
+```json
+{"buffer_size":4096,"pool_size":0,"max_connections":16}
+```
+
+Это фрагмент настроек: измените поля существующего конфига или задайте их в панели.
+Не заменяйте весь файл этим фрагментом — в нём хранится секрет.
+Больший буфер и пул иногда ускоряют передачу/подключение, но расходуют больше RAM.
+Размер Linux-бинарника, RSS и скорость зависят от архитектуры, TLS и нагрузки;
+цифры с Windows нельзя переносить на MIPS. [Как измерять](docs/PERFORMANCE.md).
+
+## Настройка и управление
+
+```sh
+# Entware
 /opt/etc/init.d/S99tgwsproxy restart
 /opt/etc/init.d/S99tgwsproxy status
+
+# OpenWrt
+/etc/init.d/tgwsproxy restart
+/etc/init.d/tgwsproxy status
+logread -e tgwsproxy
 ```
 
-В Keenetic OS такие скрипты в `/opt/etc/init.d/` подхватываются
-автоматически при старте Entware — отдельно настраивать autostart не нужно.
+Панель доступна из LAN без пароля при первой установке. В разделе «Доступ к
+панели» можно задать логин/пароль. Для удалённого доступа используйте SSH-туннель;
+HTTP Basic Auth не шифрует соединение. POST-запросы защищены CSRF-токеном;
+панель принимает Host с IP роутера или явно заданным `link_host`.
 
-## Подключение Telegram
+Сохранение перезапускает прокси и переподключает клиентов. Секрет остаётся прежним,
+пока вы не нажмёте «Сменить секрет». `web_host`/`web_port` меняются в JSON-файле
+с перезапуском сервиса. `SIGHUP` перечитывает остальные настройки.
 
-В вебе кнопка **«Скопировать»** даёт ссылку вида:
+Основные поля JSON:
 
-    tg://proxy?server=192.168.1.1&port=1433&secret=dd<32-hex>
-
-Откройте её в Telegram (например, отправьте в «Избранное» и тапните) —
-прокси добавится автоматически.
-
-Ручная настройка:
-
-- **Тип**: MTProto
-- **Сервер**: IP роутера в LAN (часто `192.168.1.1`)
-- **Порт**: `1433` (или ваш)
-- **Secret**: из вебинтерфейса
-
-## Архитектура
-
-```
-[ Telegram ] ──tcp──> [ Keenetic :1433 ]
-                          ├─ MTProto handshake auth (HMAC + AES-CTR)
-                          ├─ Re-encryption (client_key ↔ upstream_key)
-                          └─ WSS to kws*.web.telegram.org:443
-                                  ↑ pool с warmup
-                                  ↓ fallback:
-                                     1. Cloudflare Worker (опц.)
-                                     2. CF-proxied домен (опц.)
-                                     3. прямой TCP на IP DC
-```
-
-Веб-UI на :1434 — отдельный asyncio HTTP-сервер в том же процессе.
-Сохранение конфига перезапускает только сервер прокси, UI остаётся
-доступным.
-
-## Безопасность веб-интерфейса
-
-По умолчанию UI слушает `0.0.0.0:1434` и **без пароля**. Это нормально
-для домашней сети, но если вы пробросили порт наружу — обязательно
-заполните `web_user`/`web_password` (Basic Auth).
-
-Ещё надёжнее — оставить `web_host = 127.0.0.1` и ходить в UI через
-SSH-туннель:
-
-```sh
-ssh -L 1434:127.0.0.1:1434 root@<router>
-```
-
-## Конфигурация — все поля
-
-| Поле | Тип | Описание |
+| Поле | По умолчанию | Назначение |
 |---|---|---|
-| `host`, `port` | str, int | На каком адресе/порту слушать MTProto-клиентов |
-| `web_host`, `web_port` | str, int | Адрес/порт веб-UI |
-| `secret` | hex(32) | MTProto-секрет, генерируется автоматически |
-| `dc_redirects` | dict | DC → IP, куда подключаемся для WS |
-| `buffer_size` | int | Размер SO_RCVBUF/SO_SNDBUF (для медленного ARM 64-256 KB) |
-| `pool_size` | int | Сколько WS-коннектов держать «горячими» на каждый DC |
-| `cfproxy` | bool | Пытаться ли CF-проксированные домены при сбое прямого WS |
-| `cfproxy_user_domain` | str | Свой CF-домен (перебивает встроенный пул) |
-| `cfproxy_worker_domain` | str | Свой CF Worker URL (пробуется первым) |
-| `fake_tls_domain` | str | SNI для Fake-TLS маскировки; пусто = выкл. |
-| `proxy_protocol` | bool | Принимать PROXY protocol v1 (если за nginx/haproxy) |
-| `log_file`, `log_max_mb`, `log_backups` | | Ротация логов |
-| `verbose` | bool | DEBUG-логи (шумно) |
-| `web_user`, `web_password` | str | Basic Auth для веб-UI; пустой пароль = выкл. |
+| `host`, `port` | `0.0.0.0`, `1433` | MTProto listener |
+| `web_host`, `web_port` | `0.0.0.0`, `1434` | Панель |
+| `secret` | случайные 16 байт в hex | Сохраняется при установке/обновлении |
+| `buffer_size` | `16384` | Буфер направления, 4096–262144 байт |
+| `pool_size` | `0` | Прогретые WS на DC/тип, 0–4 |
+| `max_connections` | `64` | Максимум принятых клиентов, 1–1024 |
+| `connect_timeout_secs` | `10` | Таймаут подключения к одному адресу |
+| `idle_timeout_secs` | `300` | Таймаут отсутствия трафика |
+| `dc_redirects` | DC2/DC4 → `149.154.167.220` | IP для прямого WS; `{}` включает только fallback |
+| `cfproxy` | `true` | Использовать резервные CF-домены |
+| `cfproxy_user_domains` | `[]` | Свои CF-домены; пусто — встроенный список |
+| `cfproxy_worker_domains` | `[]` | Свои Worker-домены |
+| `domain_refresh` | `true` | Ежечасное обновление встроенного списка |
+| `sni_fronting` | `false` | Альтернативный SNI при сбоях прямого WS |
+| `force_test_dc` | `false` | Принудительный режим тестовых DC |
+| `fake_tls_domain` | `""` | Маскировка Fake TLS, пусто — выключена |
+| `proxy_protocol` | `false` | Ожидать PROXY v1 перед handshake |
+| `link_host` | `""` | Имя/IP в tg://, пусто — адрес открытой панели |
+| `web_user`, `web_password` | `admin`, `""` | HTTP Basic Auth панели |
+| `verbose` | `false` | Диагностика в stderr/системном журнале |
 
-## Удаление
+Старые одиночные `cfproxy_user_domain`/`cfproxy_worker_domain` преобразуются в
+списки. Явный пустой список имеет приоритет. Старые secret, порты и DC-редиректы
+сохраняются. Поля Python-логирования и самообновления остаются в JSON для
+совместимости, но Rust их не исполняет: журналом управляет сервис, обновлением —
+release installer. Некорректный файл даёт ошибку, а не новый случайный secret.
 
-```sh
-sh scripts/uninstall.sh           # снять сервис, оставить конфиг и логи
-sh scripts/uninstall.sh --purge   # снести всё
-```
-
-## Совместимость
-
-- **Архитектура**: ARM (тестировано на Keenetic с Cortex-A53), MIPS теоретически
-  тоже работает, но AES-CTR через `python3-cryptography` будет заметно медленнее.
-- **Минимум RAM**: ≈ 30 MB на процесс при `pool_size=4`.
-- **Python**: 3.9+ (Entware на момент написания даёт 3.11).
-
-## CLI
-
-```
-python3 -m tgwsproxy --help
-python3 -m tgwsproxy --init-config           # создать config.json
-python3 -m tgwsproxy --print-link            # вывести tg://proxy ссылку
-python3 -m tgwsproxy --no-webui              # только прокси, без UI
-python3 -m tgwsproxy --config /path.json
-python3 -m tgwsproxy --check-update          # узнать, есть ли новая версия
-python3 -m tgwsproxy --update                # скачать и поставить новую версию
-```
-
-## Обновления
-
-Прокси умеет сам себя обновлять, забирая релизы прямо с GitHub.
-
-**Из веб-интерфейса**: блок «Обновления» → **Проверить** → **Установить**.
-Сервис остановится, новая версия распакуется в `/opt/share/tgwsproxy/`,
-сервис стартует снова. Старая копия временно сохраняется как `.backup-…`
-рядом — если новая версия не поднимется, applier автоматически откатит
-её обратно. **Конфиг `/opt/etc/tgwsproxy/config.json` не трогается** — все
-ваши настройки сохранятся.
-
-**Из shell** (то же самое, но без UI):
+## Сборка и выпуск
 
 ```sh
-ssh root@<router> -p 222 \
-    /opt/bin/python3 -m tgwsproxy --check-update
-ssh root@<router> -p 222 \
-    /opt/bin/python3 -m tgwsproxy --update
-tail -f /opt/var/log/tgwsproxy/update.log
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --release --locked
+
+# Без панели; vendored TLS сохраняется
+cargo build --release --locked --no-default-features --features vendored-tls
+
+# Альтернативный профиль для сравнения скорости и размера
+cargo build --profile speed --locked
 ```
 
-Каналы:
-- `release` (по умолчанию) — берёт последний git tag `vX.Y.Z`. Стабильный.
-- `main` — берёт последний коммит ветки main. Bleeding edge.
+На Linux для нативной сборки нужны Rust, C toolchain, make и Perl для vendored
+OpenSSL; `--no-default-features --features webui` позволяет использовать системный
+OpenSSL. Статические релизы не требуют OpenSSL-пакета на роутере, но проверяемым
+TLS-подключениям к CF/GitHub нужен системный набор CA-сертификатов.
 
-Канал и репозиторий настраиваются в Web UI (раздел «Обновления») или в
-`config.json` через поля `update_repo` и `update_channel`.
+Релизный профиль: `opt-level=z`, fat LTO, один codegen unit, `panic=abort`, strip;
+AES/CTR/SHA-256 сохраняют `opt-level=3`. TLS использует OpenSSL на Linux: это
+позволяет собирать один и тот же код для MIPS и ARM. Инструкции к cross-сборкам
+и закреплённые версии инструментов — в `.github/workflows/release.yml`.
 
-### Для разработчиков: как выпустить новую версию
+После успешной проверки всех архитектур обновите версию в `Cargo.toml` и
+`Cargo.lock`, создайте тег `v2.0.0` (или следующую версию) на проверенном коммите
+ветки `rust` и отправьте его в GitHub. Workflow публикует архивы, установщик и
+`SHA256SUMS` только для тега; `workflow_dispatch` позволяет сначала проверить сборки.
 
-В репозитории настроен GitHub Action, который при пуше тега `vX.Y.Z`
-создаёт GitHub Release. Алгоритм:
-
-```sh
-# 1. Обновите версию в коде
-sed -i 's/__version__ = ".*"/__version__ = "1.2.0"/' tgwsproxy/__init__.py
-
-# 2. Коммит и тег
-git add tgwsproxy/__init__.py
-git commit -m "Bump version to 1.2.0"
-git tag v1.2.0
-git push origin main --tags
-```
-
-Action проверит, что версия в `__init__.py` совпадает с тегом, и создаст
-Release с автоматически сгенерированными release notes. После этого все
-пользователи смогут обновиться через Web UI или `--update`.
+CLI: `--config PATH`, `--init-config`, `--check-config`, `--print-link`,
+`--no-webui`, `--version`. Обычный запуск работает в foreground.
 
 ## Лицензия
 
-MIT. Совместима с лицензией оригинального проекта Flowseal/tg-ws-proxy.
+MIT. [LICENSE](LICENSE), [LICENSE.upstream](LICENSE.upstream),
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

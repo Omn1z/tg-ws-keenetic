@@ -1,0 +1,49 @@
+[package]
+name = "tgwsproxy"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Small MTProto to WebSocket proxy for OpenWrt and Keenetic/Entware"
+license = "MIT"
+repository = "https://github.com/Omn1z/tg-ws-keenetic"
+
+[features]
+default = ["webui", "vendored-tls"]
+webui = []
+vendored-tls = ["native-tls/vendored"]
+
+[dependencies]
+aes = "0.8.4"
+base64 = "0.22"
+ctr = "0.9.2"
+hmac = "0.12"
+native-tls = "0.2"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "sync", "signal", "macros"] }
+tokio-native-tls = "0.3"
+socket2 = "0.6"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Throughput-sensitive crypto must not use size-only optimization.
+[profile.release.package.aes]
+opt-level = 3
+[profile.release.package.ctr]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3
+
+[profile.speed]
+inherits = "release"
+opt-level = 3
+

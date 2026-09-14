@@ -1,52 +1,97 @@
-name: Release
-
-# Cuts a GitHub Release for every pushed tag that looks like `vX.Y.Z`.
-# The release body is auto-generated from the changelog of merged PRs and
-# commits since the last tag. The tarball GitHub already exposes at
-# /repos/.../tarball/<tag> is what the in-app updater downloads, so we
-# don't need to upload any binaries here.
+name: Rust checks and router releases
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [rust, main]
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CROSS_REVISION: 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  check:
+    runs-on: ubuntu-24.04
     steps:
-      - name: Check out source at the tag
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Verify version in code matches the tag
+      - uses: actions/checkout@v4
+      - name: Install Rust and shell tools
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          CODE="$(grep -oE '__version__ = "[^"]+"' tgwsproxy/__init__.py | sed -E 's/.*"([^"]+)".*/\1/')"
-          echo "tag=$TAG code=$CODE"
-          if [ "$TAG" != "$CODE" ]; then
-              echo "::error::tag ($TAG) does not match tgwsproxy/__init__.py __version__ ($CODE)"
-              exit 1
-          fi
-
-      - name: Build source tarball
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt --component clippy
+          sudo apt-get update
+          sudo apt-get install -y shellcheck pkg-config libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Check and test
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          mkdir -p dist
-          # Reproducible tarball of only tracked files at this commit.
-          git archive --format=tar.gz --prefix="tg-ws-keenetic-${TAG#v}/" \
-              -o "dist/tg-ws-keenetic-${TAG#v}.tar.gz" "$TAG"
-          ls -la dist
+          cargo +1.97.0 fmt --all -- --check
+          cargo +1.97.0 clippy --locked --all-targets --all-features -- -D warnings
+          cargo +1.97.0 test --locked
+          cargo +1.97.0 test --locked --no-default-features
+          shellcheck -S warning scripts/install.sh scripts/uninstall.sh scripts/test-installer.sh scripts/build-release.sh etc/init.d/S99tgwsproxy
+          sh scripts/test-installer.sh
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          test "$TAG" = "v$version" || { echo "Tag $TAG differs from Cargo version $version"; exit 1; }
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+  build:
+    needs: check
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [mips, mipsel, arm, armv7, aarch64, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned cross and Rust source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup toolchain install nightly-2026-09-01 --profile minimal --component rust-src
+          cargo +1.97.0 install cross --git https://github.com/cross-rs/cross --rev "$CROSS_REVISION" --locked
+      - uses: Swatinem/rust-cache@v2
         with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: |
-            dist/*.tar.gz
+          key: router-${{ matrix.arch }}
+      - name: Build, verify static ELF, and run target startup checks
+        run: bash scripts/build-release.sh '${{ matrix.arch }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: router-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: router-*
+          path: dist
+          merge-multiple: true
+      - name: Package installation entry points and checksums
+        run: |
+          cp scripts/install.sh scripts/uninstall.sh dist/
+          cd dist
+          sha256sum tgwsproxy-*.tar.gz install.sh uninstall.sh build-*.txt > SHA256SUMS
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes
