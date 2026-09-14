@@ -1,0 +1,4 @@
+# RustCrypto aes 0.8 keeps ARMv8 intrinsics behind an opt-in cfg. Detection is
+# runtime-based on Linux, so the same binary still works on CPUs without AES.
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["--cfg", "aes_armv8"]

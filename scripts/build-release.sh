@@ -17,6 +17,10 @@ case "$arch" in
 esac
 export RUSTFLAGS='-C target-feature=+crt-static'
 case "$arch" in
+    aarch64)
+        # Explicit RUSTFLAGS override .cargo/config.toml, so retain this opt-in.
+        export RUSTFLAGS="$RUSTFLAGS --cfg aes_armv8"
+        ;;
     mips|mipsel)
         # build-std does not install musl CRT objects. Let the cross GCC linker
         # locate those objects in its sysroot while still linking statically.
@@ -51,6 +55,10 @@ case "$backend" in
 esac
 rustc +"$toolchain" --version >> "dist/build-$arch.txt"
 "${builder[@]}" +"$toolchain" build --locked --release --target "$target"
+if [[ "$backend" = native ]]; then
+    # Exercise the ARM hardware AES backend and Linux control plane before shipping.
+    cargo +"$toolchain" test --locked --release --target "$target"
+fi
 binary="target/$target/release/tgwsproxy"
 file "$binary" | tee -a "dist/build-$arch.txt"
 # Reject silently dynamic executables (including a dynamic OpenSSL dependency).
