@@ -182,7 +182,7 @@ sh scripts/install.sh --binary /tmp/tgwsproxy
 `--root /absolute/staging --no-start` раскладывает файлы в отдельном каталоге
 без root и без обращения к сервисам основной системы.
 
-Сборка Linux-релизов требует Docker, Rust, `cross` и `jq` на рабочем компьютере:
+Cross-сборка Linux-релизов требует Docker, Rust, `cross` и `jq` на рабочем компьютере:
 
 ```sh
 rustup toolchain install nightly-2026-09-01 --profile minimal --component rust-src
@@ -190,11 +190,23 @@ cargo install cross --git https://github.com/cross-rs/cross --rev 8c1a8aa4b66171
 bash scripts/build-release.sh mipsel
 ```
 
+ARM64 также собирается без Docker на ARM64 Linux. Например, на Ubuntu 24.04 ARM:
+
+```sh
+sudo apt-get install musl-tools build-essential perl jq binutils file
+rustup toolchain install 1.97.0 --profile minimal --target aarch64-unknown-linux-musl
+bash scripts/build-release.sh aarch64 native
+```
+
+Именно этот вариант использует ARM64 job в GitHub Actions. Он запускает весь
+набор Rust-тестов на ARM64, включая аппаратное AES. Ручной запуск workflow с
+`arch=aarch64` собирает только эту архитектуру; релизный тег всегда собирает все шесть.
+
 В `Cross.toml` MIPS использует `build-std`: Rust не распространяет готовый
 `std` для этих Tier 3 целей. Скрипт дополнительно отключает self-contained
 поиск CRT, чтобы linker использовал CRT из cross sysroot. Все шесть целей
 собираются в CI; до публикации выполняются проверка static ELF и запуск CLI
-через QEMU. Это не заменяет испытаний на физическом роутере.
+на ARM64 Linux либо через QEMU для cross-сборок. Это не заменяет испытаний на физическом роутере.
 
 Rust nightly и версия `cross` зафиксированы. Теги контейнеров cross `main`
 могут обновляться; фактически использованный digest сохраняется в отчёте

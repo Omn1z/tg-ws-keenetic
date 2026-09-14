@@ -141,8 +141,20 @@ mod http {
             let mut server = Self(child);
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                if TcpStream::connect(("127.0.0.1", web_port)).is_ok() {
-                    return server;
+                // A connect-only probe can self-connect to its ephemeral source
+                // port on Linux before the listener has bound. Require real HTTP.
+                if let Ok(response) = request(
+                    web_port,
+                    "GET",
+                    "/api/state",
+                    &format!("127.0.0.1:{web_port}"),
+                    None,
+                    None,
+                    None,
+                ) {
+                    if response.status == 401 || response.status == 200 {
+                        return server;
+                    }
                 }
                 if let Some(exit) = server.0.try_wait().unwrap() {
                     let mut error = String::new();
@@ -209,26 +221,27 @@ mod http {
         ));
         wire.write_all(head.as_bytes())?;
         wire.write_all(&body)?;
-        let mut reply = Vec::new();
-        wire.read_to_end(&mut reply)?;
-        let boundary = reply
-            .windows(4)
-            .position(|part| part == b"\r\n\r\n")
-            .ok_or_else(|| io::Error::other("incomplete HTTP response"))?;
-        let headers = String::from_utf8(reply[..boundary].to_vec()).unwrap();
+        // HTTP completion is defined by Content-Length, not a subsequent TCP EOF.
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            if head.len() >= 16384 {
+                return Err(io::Error::other("oversized HTTP response"));
+            }
+            let mut byte = [0u8];
+            wire.read_exact(&mut byte)?;
+            head.push(byte[0]);
+        }
+        let headers = String::from_utf8(head[..head.len() - 4].to_vec()).unwrap();
         let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
-        let body = reply[boundary + 4..].to_vec();
         let length: usize = headers
             .lines()
             .find_map(|line| line.strip_prefix("Content-Length: "))
             .unwrap()
             .parse()
             .unwrap();
-        assert_eq!(
-            length,
-            body.len(),
-            "HTTP response length must match its body"
-        );
+        assert!(length <= 65536, "HTTP response must be bounded");
+        let mut body = vec![0; length];
+        wire.read_exact(&mut body)?;
         Ok(Response {
             status,
             headers,

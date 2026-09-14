@@ -27,6 +27,9 @@ env:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    env:
+      # Target build jobs independently compile and test vendored static TLS.
+      OPENSSL_NO_VENDOR: 1
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust and shell tools
