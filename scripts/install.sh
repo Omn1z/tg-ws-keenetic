@@ -100,12 +100,20 @@ trap 'exit 130' INT
 trap 'exit 143' HUP TERM
 WORK=$(mktemp -d "$BIN_DIR/.tgwsproxy-install.XXXXXX") || die "Cannot create staging directory"
 fetch() {
-    if command -v curl >/dev/null 2>&1; then
-        curl --fail --location --retry 2 --connect-timeout 20 --max-time 300 --proto '=https' --tlsv1.2 "$1" -o "$2"
+    # Noninteractive Keenetic SSH may put a HTTP-only BusyBox wget first in
+    # PATH. Entware's /opt/bin/wget is the TLS-capable package executable.
+    if [ "$SYSTEM" = entware ] && [ -z "$ROOT" ] && [ -x /opt/bin/wget ]; then
+        WGET=/opt/bin/wget
     elif command -v wget >/dev/null 2>&1; then
-        wget -O "$2" "$1"
-    else die "Install curl or wget with HTTPS support and ca-certificates first"
+        WGET=$(command -v wget)
+    else
+        die "HTTPS wget is missing. On Entware run: opkg install wget-ssl ca-certificates; then use /opt/bin/wget"
     fi
+    # Shared BusyBox/GNU wget flags. Keep certificate verification enabled.
+    "$WGET" -O "$2" "$1" || {
+        say "Download failed using $WGET. Check URL, network, clock and CA certificates. For HTTPS on Entware: opkg install wget-ssl ca-certificates; use /opt/bin/wget." >&2
+        return 1
+    }
 }
 detect_arch() {
     machine=$(uname -m)

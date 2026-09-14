@@ -1,29 +1,57 @@
 # Установка Rust-версии TG WS
 
-Один исполняемый файл содержит прокси, TLS и веб-панель. Python и сборка на
-роутере не нужны. Для загрузки нужны `curl` или `wget` с HTTPS, доверенные
-CA-сертификаты, `tar` и `sha256sum` (обычно уже есть в BusyBox).
+## Инструкция по установке
+
+Выполните по SSH от root на OpenWrt или Keenetic с Entware:
+
+```sh
+wget -O /tmp/tgws-install.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh && sh /tmp/tgws-install.sh
+```
 
 **Ветка `rust` готовит выпуск 2.0.0. Команда установки из последнего релиза
 станет доступна после публикации первого Rust-релиза с бинарными файлами.**
 Старые Python-релизы не содержат нужных assets: установщик сообщит об этом
 и оставит работающую установку на месте.
 
-## Последний релиз
+Панель после установки: **`http://<IP-роутера>:1434/`** → **«Открыть Telegram»**.
+Порт прокси: `1433/TCP`. Установщик сам выбирает архитектуру, проверяет SHA-256
+и включает автозапуск.
 
-Выполните по SSH от root:
+## Инструкция по обновлению
 
-```sh
-curl -fL https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh -o /tmp/tgws-install.sh
-sh /tmp/tgws-install.sh
-```
-
-Если доступен только `wget`:
+Загрузите актуальный установщик и запустите его той же командой:
 
 ```sh
-wget -O /tmp/tgws-install.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh
-sh /tmp/tgws-install.sh
+wget -O /tmp/tgws-install.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh && sh /tmp/tgws-install.sh
 ```
+
+Настройки, секрет и пароль панели сохраняются. При ошибке запуска установщик
+восстанавливает прежние файлы сервиса. Команда требует опубликованного Rust-релиза.
+
+## Инструкция по удалению
+
+Удаление сервиса с сохранением настроек, по SSH от root:
+
+```sh
+wget -O /tmp/tgws-uninstall.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/uninstall.sh && sh /tmp/tgws-uninstall.sh
+```
+
+Полное удаление **вместе с настройками, секретом и журналом**:
+
+```sh
+wget -O /tmp/tgws-uninstall.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/uninstall.sh && sh /tmp/tgws-uninstall.sh --purge
+```
+
+Ссылка на `uninstall.sh` заработает после первого Rust-релиза. Из рабочей копии
+запустите `sh scripts/uninstall.sh`, из распакованного релизного архива —
+`sh uninstall.sh`; для полного удаления добавьте `--purge`.
+Удаление не деинсталлирует Python, OpenSSL и другие общие пакеты.
+
+## Требования и выбор системы
+
+Один исполняемый файл содержит прокси, TLS и веб-панель. Python и сборка на
+роутере не нужны. Для загрузки нужны `wget` с HTTPS, доверенные
+CA-сертификаты, `tar` и `sha256sum` (обычно уже есть в BusyBox).
 
 OpenWrt с `procd` определяется автоматически; Keenetic должен уже иметь
 работающий Entware, смонтированный в `/opt`. Если на OpenWrt дополнительно
@@ -35,13 +63,17 @@ sh /tmp/tgws-install.sh --system entware
 sh /tmp/tgws-install.sh --system openwrt
 ```
 
-При отсутствии HTTPS-инструмента установите `curl` и `ca-certificates`
+Если имеющийся `wget` не поддерживает HTTPS, установите `wget-ssl` и `ca-certificates`
 через пакетный менеджер своей системы. Для Entware:
 
 ```sh
 opkg update
-opkg install curl ca-certificates
+opkg install wget-ssl ca-certificates
 ```
+
+Если после установки по-прежнему запускается системный `wget` без HTTPS,
+повторите команду загрузки с `/opt/bin/wget` вместо `wget`.
+[Подробности в документации Entware](https://github.com/Entware/Entware/wiki/Using-HTTPS-with-opkg).
 
 На OpenWrt используйте `opkg` или `apk`, в зависимости от версии прошивки.
 Установщик не меняет firewall: прокси и панель должны быть доступны только
@@ -78,9 +110,9 @@ opkg install curl ca-certificates
 /etc/init.d/tgwsproxy restart
 ```
 
-## Обновление и откат
+## Как проходит обновление и откат
 
-Повторите команду установки. Установщик один раз определяет тег последнего
+Установщик один раз определяет тег последнего
 релиза, затем загружает архив и `SHA256SUMS` именно этого тега. Проверка
 контрольной суммы обнаруживает повреждённую загрузку; это не независимая
 цифровая подпись.
@@ -174,7 +206,7 @@ Rust nightly и версия `cross` зафиксированы. Теги кон
 sh scripts/test-installer.sh
 ```
 
-## Диагностика и удаление
+## Диагностика
 
 ```sh
 # Entware
@@ -190,13 +222,3 @@ logread -e tgwsproxy
 — неподдерживаемые инструкции, ошибка bind — занятый порт. Ошибки сертификата
 требуют корректных даты/времени и CA-сертификатов. После изменения конфига
 перезапустите сервис.
-
-Удаление из исходников или распакованного релиза:
-
-```sh
-sh scripts/uninstall.sh         # сохранить настройки
-sh scripts/uninstall.sh --purge # удалить настройки и журнал tgwsproxy
-```
-
-В релизном архиве скрипт лежит в корне: `sh uninstall.sh`. Удаление не
-деинсталлирует Python, OpenSSL и любые другие общие пакеты.

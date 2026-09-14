@@ -76,10 +76,10 @@ cp "$HERE/../etc/init.d/"* "$TEST_DIR/release/etc/init.d/"
 (cd "$TEST_DIR/release" && tar -czf "$TEST_DIR/tgwsproxy-mips.tar.gz" tgwsproxy etc)
 cp "$TEST_DIR/tgwsproxy-mips.tar.gz" "$TEST_DIR/tgwsproxy-mipsel.tar.gz"
 (cd "$TEST_DIR" && sha256sum tgwsproxy-mips.tar.gz tgwsproxy-mipsel.tar.gz > SHA256SUMS)
-cat > "$TEST_DIR/bin/curl" <<'EOF'
+cat > "$TEST_DIR/bin/wget" <<'EOF'
 #!/bin/sh
 while [ "$#" -gt 0 ]; do
-    case "$1" in https://*) url=$1; shift ;; -o) out=$2; shift 2 ;; *) shift ;; esac
+    case "$1" in https://*) url=$1; shift ;; -O) out=$2; shift 2 ;; *) exit 2 ;; esac
 done
 printf '%s\n' "$url" >> "$TGWS_TEST_DATA/requests"
 case "$url" in
@@ -106,6 +106,9 @@ for TGWS_TEST_ENDIAN in 1 2; do
     tail -n1 "$TEST_DIR/requests" | grep -q "/v2.0.0/tgwsproxy-$asset.tar.gz$" || fail 'MIPS byte order or version pin'
 done
 before=$(sha256sum "$TEST_DIR/download/usr/bin/tgwsproxy")
+# Staging Entware must also honor PATH, rather than use the host's /opt/bin.
+sh "$HERE/install.sh" --root "$TEST_DIR/download-entware" --system entware --no-start > "$TEST_DIR/output" 2>&1 || { cat "$TEST_DIR/output"; fail 'Entware staged wget selection'; }
+[ -f "$TEST_DIR/download-entware/opt/bin/tgwsproxy" ] || fail 'Entware release download'
 printf 'tampered' >> "$TEST_DIR/tgwsproxy-mips.tar.gz"
 if sh "$HERE/install.sh" --root "$TEST_DIR/download" --system openwrt --no-start > "$TEST_DIR/output" 2>&1; then fail 'accepted bad checksum'; fi
 after=$(sha256sum "$TEST_DIR/download/usr/bin/tgwsproxy")

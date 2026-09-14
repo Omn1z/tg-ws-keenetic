@@ -1,24 +1,8 @@
 # TG WS Proxy · Rust для OpenWrt / Keenetic
 
-MTProto → WebSocket прокси Telegram **на самом роутере**. Один нативный бинарник
-со встроенной небольшой веб-панелью. Не нужны Python, Node.js, Git или компилятор
-на роутере. Ветка `rust` заменяет прежнюю реализацию на Python.
-
-Сетевой протокол перенесён из [Flowseal/tg-ws-proxy v1.10.2](https://github.com/Flowseal/tg-ws-proxy/tree/v1.10.2),
-коммит `f200e33fd283143a9f101d62aaf9d8c1468a23fe` от 7 сентября 2026 года.
-На 14 сентября это последний релиз и HEAD upstream. Для сверки также использованы
-наработки [NFQWS2 Strategy Selector](https://github.com/Omn1z/nfqws2-keenetic-strategy-selector).
-Это самостоятельный сервис: NFQWS2 для его запуска не требуется.
-
-## Установка последнего релиза
+## Инструкция по установке
 
 Через SSH **от root** на OpenWrt или Keenetic с уже установленным Entware:
-
-```sh
-curl -fL https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh -o /tmp/tgws-install.sh && sh /tmp/tgws-install.sh
-```
-
-Или с `wget`:
 
 ```sh
 wget -O /tmp/tgws-install.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh && sh /tmp/tgws-install.sh
@@ -32,8 +16,49 @@ wget -O /tmp/tgws-install.sh https://github.com/Omn1z/tg-ws-keenetic/releases/la
 После установки: **`http://<IP-роутера>:1434/`** → **«Открыть Telegram»**.
 Прокси слушает **1433/TCP**. Используйте LAN-адрес роутера. Проброс портов в WAN
 не нужен. Установщик выбирает архитектуру, сверяет SHA-256, создаёт случайный
-секрет, подключает автозапуск и сохраняет существующий конфиг при обновлении.
-Для обновления достаточно повторить команду.
+секрет и подключает автозапуск. Нужны `wget` с HTTPS и CA-сертификаты.
+
+## Инструкция по обновлению
+
+Повторно загрузите установщик последнего релиза и запустите его по SSH от root:
+
+```sh
+wget -O /tmp/tgws-install.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/install.sh && sh /tmp/tgws-install.sh
+```
+
+Настройки, секрет и пароль панели сохраняются. При ошибке запуска установщик
+восстанавливает прежние файлы сервиса. Как и установка, эта команда требует
+опубликованного Rust-релиза.
+
+## Инструкция по удалению
+
+Выполните по SSH от root; настройки сохранятся для повторной установки:
+
+```sh
+wget -O /tmp/tgws-uninstall.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/uninstall.sh && sh /tmp/tgws-uninstall.sh
+```
+
+Для полного удаления **вместе с настройками, секретом и журналом**:
+
+```sh
+wget -O /tmp/tgws-uninstall.sh https://github.com/Omn1z/tg-ws-keenetic/releases/latest/download/uninstall.sh && sh /tmp/tgws-uninstall.sh --purge
+```
+
+Скрипт `uninstall.sh` появится по этой ссылке с первым Rust-релизом.
+Python и другие общие пакеты не удаляются. Если установили из рабочей копии,
+используйте её `sh scripts/uninstall.sh` (полное удаление: добавьте `--purge`).
+
+## О проекте
+
+MTProto → WebSocket прокси Telegram **на самом роутере**. Один нативный бинарник
+со встроенной небольшой веб-панелью. Не нужны Python, Node.js, Git или компилятор
+на роутере. Ветка `rust` заменяет прежнюю реализацию на Python.
+
+Сетевой протокол перенесён из [Flowseal/tg-ws-proxy v1.10.2](https://github.com/Flowseal/tg-ws-proxy/tree/v1.10.2),
+коммит `f200e33fd283143a9f101d62aaf9d8c1468a23fe` от 7 сентября 2026 года.
+На 14 сентября это последний релиз и HEAD upstream. Для сверки также использованы
+наработки [NFQWS2 Strategy Selector](https://github.com/Omn1z/nfqws2-keenetic-strategy-selector).
+Это самостоятельный сервис: NFQWS2 для его запуска не требуется.
 
 | Система | Бинарник | Конфигурация | Сервис |
 |---|---|---|---|

@@ -6,6 +6,12 @@ on:
     tags: ['v*.*.*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      arch:
+        description: Router architecture to build (release tags always build all)
+        type: choice
+        default: all
+        options: [all, mips, mipsel, arm, armv7, aarch64, x86_64]
 
 permissions:
   contents: read
@@ -47,14 +53,21 @@ jobs:
 
   build:
     needs: check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [mips, mipsel, arm, armv7, aarch64, x86_64]
+        arch: ${{ fromJSON(github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && inputs.arch != 'all' && format('["{0}"]', inputs.arch) || '["mips","mipsel","arm","armv7","aarch64","x86_64"]') }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install native ARM64 musl build tools
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools build-essential perl jq binutils file
+          rustup toolchain install 1.97.0 --profile minimal --target aarch64-unknown-linux-musl
       - name: Install pinned cross and Rust source
+        if: matrix.arch != 'aarch64'
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
@@ -65,7 +78,7 @@ jobs:
         with:
           key: router-${{ matrix.arch }}
       - name: Build, verify static ELF, and run target startup checks
-        run: bash scripts/build-release.sh '${{ matrix.arch }}'
+        run: bash scripts/build-release.sh '${{ matrix.arch }}' '${{ matrix.arch == 'aarch64' && 'native' || 'cross' }}'
       - uses: actions/upload-artifact@v4
         with:
           name: router-${{ matrix.arch }}

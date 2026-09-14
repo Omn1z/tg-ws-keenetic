@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Linux + Docker + cross + nightly-2026-09-01/rust-src. Run from repo root.
+# Native ARM64: Linux + musl-tools + Rust 1.97.0 + aarch64 musl target.
+# Other targets: Linux + Docker + cross + nightly-2026-09-01/rust-src.
+# Run from repo root; the optional second argument selects native or cross.
 set -euo pipefail
 arch=${1:?Usage: scripts/build-release.sh mips|mipsel|arm|armv7|aarch64|x86_64}
+backend=${2:-cross}
 toolchain=nightly-2026-09-01
 case "$arch" in
     mips) target=mips-unknown-linux-musl ;;
@@ -22,13 +25,32 @@ case "$arch" in
 esac
 export SOURCE_DATE_EPOCH
 SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
-image="ghcr.io/cross-rs/$target:main"
-docker pull "$image"
 mkdir -p dist
-docker inspect --format '{{index .RepoDigests 0}}' "$image" > "dist/build-$arch.txt"
+case "$backend" in
+    native)
+        if [[ "$arch" != aarch64 || "$(uname -m)" != aarch64 ]]; then
+            echo 'Native builds require an aarch64 Linux host and aarch64 target' >&2; exit 1
+        fi
+        toolchain=1.97.0
+        export CC_aarch64_unknown_linux_musl=musl-gcc
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+        builder=(cargo)
+        printf 'backend=native\nhost=%s\n' "$(uname -m)" > "dist/build-$arch.txt"
+        musl-gcc --version | head -n1 >> "dist/build-$arch.txt"
+        # Record libc/compiler versions alongside the locked Rust dependencies.
+        dpkg-query -W musl musl-dev musl-tools gcc >> "dist/build-$arch.txt"
+        ;;
+    cross)
+        image="ghcr.io/cross-rs/$target:main"
+        docker pull "$image"
+        docker inspect --format '{{index .RepoDigests 0}}' "$image" > "dist/build-$arch.txt"
+        builder=(cross)
+        cross --version >> "dist/build-$arch.txt"
+        ;;
+    *) echo "Unsupported build backend: $backend" >&2; exit 1 ;;
+esac
 rustc +"$toolchain" --version >> "dist/build-$arch.txt"
-cross --version >> "dist/build-$arch.txt"
-cross +"$toolchain" build --locked --release --target "$target"
+"${builder[@]}" +"$toolchain" build --locked --release --target "$target"
 binary="target/$target/release/tgwsproxy"
 file "$binary" | tee -a "dist/build-$arch.txt"
 # Reject silently dynamic executables (including a dynamic OpenSSL dependency).
@@ -40,12 +62,12 @@ fi
 if grep -q 'NEEDED' <<< "$dynamic_headers"; then
     echo 'ERROR: release binary has dynamic library dependencies' >&2; exit 1
 fi
-# QEMU via cross exercises real target code, including endian-sensitive startup.
-cross +"$toolchain" run --locked --release --target "$target" -- --version
+# Native execution or QEMU via cross exercises actual target startup code.
+"${builder[@]}" +"$toolchain" run --locked --release --target "$target" -- --version
 config="target/smoke-$arch.json"
 rm -f "$config"
-cross +"$toolchain" run --locked --release --target "$target" -- --config "$config" --init-config
-cross +"$toolchain" run --locked --release --target "$target" -- --config "$config" --check-config
+"${builder[@]}" +"$toolchain" run --locked --release --target "$target" -- --config "$config" --init-config
+"${builder[@]}" +"$toolchain" run --locked --release --target "$target" -- --config "$config" --check-config
 rm -f "$config"
 package=$(mktemp -d)
 trap 'rm -rf "$package"' EXIT
