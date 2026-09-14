@@ -14,3 +14,9 @@ Linux release binaries statically link OpenSSL through openssl-src. OpenSSL 3
 is licensed under Apache-2.0. The release packaging includes the OpenSSL license
 alongside this project's MIT license and the upstream notice. Native Windows
 development builds use Schannel and native macOS builds use Security Framework.
+
+MIPS/MIPSEL cross builds also use the GCC 9.2 static runtime and GNU unwinder
+from the recorded cross toolchain image. These runtime libraries are covered
+by GPLv3 with the GCC Runtime Library Exception. The MIPS release archives
+include the corresponding texts as licenses/GCC-COPYING3 and
+licenses/GCC-COPYING.RUNTIME; build metadata records their source and hashes.

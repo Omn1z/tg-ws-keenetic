@@ -321,6 +321,63 @@ mod http {
         );
         let original_secret = state["config"]["secret"].clone();
         let csrf = state["csrf"].as_str().unwrap();
+        // A development checkout cannot replace a managed router executable.
+        assert_eq!(state["update"]["supported"], false);
+        let update_state = request(
+            web_port,
+            "GET",
+            "/api/update/status",
+            &host,
+            Some("testpassword"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(update_state.status, 200);
+        assert_eq!(
+            request(
+                web_port,
+                "GET",
+                "/api/update/status",
+                &host,
+                None,
+                None,
+                None
+            )
+            .unwrap()
+            .status,
+            401
+        );
+        for endpoint in ["/api/update", "/api/update/check"] {
+            assert_eq!(
+                request(
+                    web_port,
+                    "POST",
+                    endpoint,
+                    &host,
+                    Some("testpassword"),
+                    None,
+                    None
+                )
+                .unwrap()
+                .status,
+                403
+            );
+        }
+        assert_eq!(
+            request(
+                web_port,
+                "POST",
+                "/api/update",
+                &host,
+                Some("testpassword"),
+                Some(csrf),
+                None
+            )
+            .unwrap()
+            .status,
+            400
+        );
         for token in [None, Some("invalid-token")] {
             let denied = request(
                 web_port,

@@ -1,7 +1,7 @@
 # MIPS has no distributed rust-std: build it with pinned nightly + rust-src.
 # Use the current cross toolchain images; each CI job records its resolved digest.
 [build.env]
-passthrough = ["RUSTFLAGS", "SOURCE_DATE_EPOCH"]
+passthrough = ["RUSTFLAGS", "SOURCE_DATE_EPOCH", "TGWS_ARCH", "QEMU_CPU"]
 
 [target.mips-unknown-linux-musl]
 image = "ghcr.io/cross-rs/mips-unknown-linux-musl:main"

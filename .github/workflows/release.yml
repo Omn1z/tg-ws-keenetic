@@ -44,8 +44,9 @@ jobs:
           cargo +1.97.0 clippy --locked --all-targets --all-features -- -D warnings
           cargo +1.97.0 test --locked
           cargo +1.97.0 test --locked --no-default-features
-          shellcheck -S warning scripts/install.sh scripts/uninstall.sh scripts/test-installer.sh scripts/build-release.sh etc/init.d/S99tgwsproxy
+          shellcheck -S warning scripts/install.sh scripts/uninstall.sh scripts/test-installer.sh scripts/update-worker.sh scripts/test-update-worker.sh scripts/build-release.sh etc/init.d/S99tgwsproxy
           sh scripts/test-installer.sh
+          sh scripts/test-update-worker.sh
       - name: Verify release version
         if: startsWith(github.ref, 'refs/tags/')
         env:

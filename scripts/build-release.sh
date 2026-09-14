@@ -15,16 +15,25 @@ case "$arch" in
     x86_64) target=x86_64-unknown-linux-musl ;;
     *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
 esac
+export TGWS_ARCH=$arch
 export RUSTFLAGS='-C target-feature=+crt-static'
 case "$arch" in
+    arm)
+        # Exercise the advertised ARMv5TE baseline, without VFP/NEON support.
+        export QEMU_CPU=arm926
+        ;;
     aarch64)
         # Explicit RUSTFLAGS override .cargo/config.toml, so retain this opt-in.
         export RUSTFLAGS="$RUSTFLAGS --cfg aes_armv8"
         ;;
     mips|mipsel)
+        # 24Kc has MIPS32r2 but no FPU, like the smallest supported routers.
+        export QEMU_CPU=24Kc
         # build-std does not install musl CRT objects. Let the cross GCC linker
         # locate those objects in its sysroot while still linking statically.
-        export RUSTFLAGS="$RUSTFLAGS -C link-self-contained=no"
+        # GCC-built OpenSSL also needs the compiler runtime's 64-bit comparison
+        # helpers on MIPS; rustc uses -nodefaultlibs when linking build-std.
+        export RUSTFLAGS="$RUSTFLAGS -C link-self-contained=no -C link-arg=-lgcc"
         ;;
 esac
 export SOURCE_DATE_EPOCH
@@ -54,6 +63,7 @@ case "$backend" in
     *) echo "Unsupported build backend: $backend" >&2; exit 1 ;;
 esac
 rustc +"$toolchain" --version >> "dist/build-$arch.txt"
+printf 'artifact_arch=%s\nsmoke_cpu=%s\n' "$TGWS_ARCH" "${QEMU_CPU:-native/default}" >> "dist/build-$arch.txt"
 "${builder[@]}" +"$toolchain" build --locked --release --target "$target"
 if [[ "$backend" = native ]]; then
     # Exercise the ARM hardware AES backend and Linux control plane before shipping.
@@ -83,7 +93,7 @@ trap 'rm -rf "$package"' EXIT
 mkdir -p "$package/etc/init.d"
 cp "$binary" "$package/tgwsproxy"
 cp etc/init.d/S99tgwsproxy etc/init.d/tgwsproxy "$package/etc/init.d/"
-cp scripts/install.sh scripts/uninstall.sh LICENSE LICENSE.upstream THIRD_PARTY_NOTICES.md "$package/"
+cp scripts/install.sh scripts/uninstall.sh scripts/update-worker.sh LICENSE LICENSE.upstream THIRD_PARTY_NOTICES.md "$package/"
 mkdir -p "$package/licenses"
 # Cargo metadata points to the precise locked crate sources. Keep their actual
 # license texts in the archive, including the statically linked OpenSSL source.
@@ -123,7 +133,7 @@ rm "$package/dependencies.json" "$package/dependency-paths.tsv"
 chmod 755 "$package/tgwsproxy" "$package/"*.sh "$package/etc/init.d/"*
 tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
     -C "$package" -czf "dist/tgwsproxy-$arch.tar.gz" \
-    tgwsproxy etc install.sh uninstall.sh LICENSE LICENSE.upstream THIRD_PARTY_NOTICES.md licenses
+    tgwsproxy etc install.sh uninstall.sh update-worker.sh LICENSE LICENSE.upstream THIRD_PARTY_NOTICES.md licenses
 printf 'binary_bytes=%s\n' "$(wc -c < "$binary")" >> "dist/build-$arch.txt"
 printf 'archive_bytes=%s\n' "$(wc -c < "dist/tgwsproxy-$arch.tar.gz")" >> "dist/build-$arch.txt"
 cat "dist/build-$arch.txt"

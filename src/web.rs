@@ -36,6 +36,7 @@ struct State {
     changes: mpsc::Sender<Change>,
     csrf: String,
     mutation: tokio::sync::Mutex<()>,
+    updater: Arc<crate::update::Updater>,
 }
 
 impl Web {
@@ -43,6 +44,7 @@ impl Web {
         config: Arc<RwLock<Config>>,
         stats: Arc<Stats>,
         changes: mpsc::Sender<Change>,
+        path: &std::path::Path,
     ) -> io::Result<Self> {
         let cfg = config.read().unwrap().clone();
         let listener = TcpListener::bind((cfg.web_host.as_str(), cfg.web_port)).await?;
@@ -53,6 +55,7 @@ impl Web {
             changes,
             csrf: config::random_hex(),
             mutation: tokio::sync::Mutex::new(()),
+            updater: crate::update::Updater::new(path),
         });
         let task = tokio::spawn(async move {
             let slots = Arc::new(Semaphore::new(8));
@@ -282,13 +285,38 @@ async fn handle(stream: TcpStream, state: Arc<State>) -> io::Result<()> {
             safe_config.as_object_mut().unwrap().remove("web_password");
             let value = serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "upstream": config::UPSTREAM_VERSION,
                 "upstream_commit": config::UPSTREAM_COMMIT, "config": safe_config, "stats": state.stats.snapshot(),
-                "link": cfg.link(&host), "csrf": state.csrf, "password_set": !cfg.web_password.is_empty()});
+                "link": cfg.link(&host), "csrf": state.csrf, "password_set": !cfg.web_password.is_empty(), "update": state.updater.status()});
             (
                 200,
                 "application/json",
                 serde_json::to_vec(&value).map_err(io::Error::other)?,
             )
         }
+        ("GET", "/api/update/check") | ("POST", "/api/update/check") => {
+            let info = state.updater.check(request.method == "POST");
+            (
+                200,
+                "application/json",
+                serde_json::to_vec(&info).map_err(io::Error::other)?,
+            )
+        }
+        ("GET", "/api/update/status") => (
+            200,
+            "application/json",
+            serde_json::to_vec(&state.updater.status()).map_err(io::Error::other)?,
+        ),
+        ("POST", "/api/update") => match state.updater.start() {
+            Ok(info) => (
+                202,
+                "application/json",
+                serde_json::to_vec(&info).map_err(io::Error::other)?,
+            ),
+            Err(error) => (
+                400,
+                "application/json",
+                serde_json::to_vec(&serde_json::json!({"error":error.to_string()})).unwrap(),
+            ),
+        },
         ("POST", "/api/config" | "/api/restart" | "/api/secret") => {
             let next = if request.path == "/api/config" {
                 if !request
@@ -355,6 +383,7 @@ async fn respond(
 ) -> io::Result<()> {
     let reason = match code {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",

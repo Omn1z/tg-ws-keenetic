@@ -4,6 +4,8 @@ mod fake_tls;
 mod framing;
 mod proxy;
 mod stats;
+#[cfg(feature = "webui")]
+mod update;
 mod upstream;
 #[cfg(feature = "webui")]
 mod web;
@@ -127,7 +129,7 @@ async fn serve(cfg: Config, path: PathBuf, no_webui: bool) -> io::Result<()> {
     let _web = if no_webui {
         None
     } else {
-        Some(web::Web::start(shared.clone(), stats.clone(), _changes.clone()).await?)
+        Some(web::Web::start(shared.clone(), stats.clone(), _changes.clone(), &path).await?)
     };
     #[cfg(not(feature = "webui"))]
     let _ = no_webui;
