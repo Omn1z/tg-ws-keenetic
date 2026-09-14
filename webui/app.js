@@ -27,7 +27,6 @@ async function refresh(reset=false){
     $('active').textContent=s.connections_active;$('total').textContent=`Всего ${s.connections_total}`;
     $('up').textContent=bytes(s.bytes_up);$('down').textContent=bytes(s.bytes_down);$('uptime').textContent=elapsed(Math.floor(s.uptime_secs));
     $('routes').textContent=`WS ${s.connections_ws} · CF ${s.connections_cfproxy} · TCP ${s.connections_tcp_fallback}`;
-    $('upstream').textContent=`Flowseal ${data.upstream}`;
     if(!loaded||reset){populate(data.config,data.password_set);loaded=true;}
   }catch(error){$('status').textContent='Нет связи';$('led').className='off';if(!loaded)notice(error.message,true);}
 }
