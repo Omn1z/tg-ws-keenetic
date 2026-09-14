@@ -160,6 +160,7 @@ class ProxyServer:
             buffer_size=self._config.buffer_size,
             fake_tls_domain=self._config.fake_tls_domain,
             proxy_protocol=self._config.proxy_protocol,
+            force_test_dc=self._config.force_test_dc,
             fallback=FallbackConfig(
                 cfproxy_enabled=self._config.cfproxy,
                 cfproxy_worker_domain=self._config.cfproxy_worker_domain,

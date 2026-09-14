@@ -34,7 +34,13 @@ from .fallback import FallbackConfig, attempt_fallback
 from .stats import Stats
 from .websocket import RawWebSocket, WsHandshakeError, apply_socket_options
 from .ws_pool import WebSocketPool, ws_domains_for
-from .constants import HANDSHAKE_LEN, TLS_RECORD_HANDSHAKE
+from .constants import (
+    DC_TEST_IPS,
+    HANDSHAKE_LEN,
+    TLS_RECORD_HANDSHAKE,
+    WS_PATH,
+    WS_PATH_TEST,
+)
 
 log = logging.getLogger("tgwsproxy.handler")
 
@@ -52,6 +58,7 @@ class HandlerSettings:
     buffer_size: int
     fake_tls_domain: str
     proxy_protocol: bool
+    force_test_dc: bool
     fallback: FallbackConfig
 
 
@@ -265,8 +272,15 @@ class ClientHandler:
     ) -> None:
         dc, is_media = parsed.dc_id, parsed.is_media
         proto_int = parsed.proto_int
-        dc_key = f"{dc}{'m' if is_media else ''}"
         media_tag = " media" if is_media else ""
+
+        is_test_dc = self._settings.force_test_dc or dc >= 10000
+        if dc >= 10000:
+            log.info("[%s] test DC%d -> DC%d", label, dc, dc - 10000)
+            dc -= 10000
+
+        dc_key = f"{dc}{'t' if is_test_dc else ''}{'m' if is_media else ''}"
+        ws_path = WS_PATH_TEST if is_test_dc else WS_PATH
 
         log.debug(
             "[%s] handshake ok DC%d%s proto=0x%08X",
@@ -290,6 +304,7 @@ class ClientHandler:
             if not await attempt_fallback(
                 reader, writer, relay_init, label, dc, is_media, ctx,
                 self._stats, self._settings.fallback, splitter,
+                is_test_dc=is_test_dc,
             ):
                 log.warning(
                     "[%s] DC%d%s no fallback available",
@@ -297,7 +312,8 @@ class ClientHandler:
                 )
             return
 
-        # Try the WS pool first, then a fresh connect.
+        # Try the WS pool first, then a fresh connect. Test DCs are never
+        # pooled — they use the dedicated /apiws_test endpoint instead.
         target_ip = self._settings.dc_redirects[dc]
         domains = ws_domains_for(dc, is_media)
         timeout = (
@@ -306,7 +322,9 @@ class ClientHandler:
             else WS_DEFAULT_TIMEOUT
         )
 
-        ws = await self._pool.acquire(dc, is_media, target_ip, domains)
+        ws = None if is_test_dc else await self._pool.acquire(
+            dc, is_media, target_ip, domains
+        )
         ws_redirect_only = True
         ws_failed = ws is None
 
@@ -316,12 +334,13 @@ class ClientHandler:
         else:
             for domain in domains:
                 log.info(
-                    "[%s] DC%d%s -> wss://%s via %s",
-                    label, dc, media_tag, domain, target_ip,
+                    "[%s] DC%d%s -> %s via %s",
+                    label, dc, media_tag, ws_path, target_ip,
                 )
                 try:
                     ws = await RawWebSocket.connect(
                         target_ip, domain, timeout=timeout,
+                        path=ws_path,
                         buffer_size=self._settings.buffer_size,
                     )
                     ws_failed = False
@@ -355,6 +374,7 @@ class ClientHandler:
             await attempt_fallback(
                 reader, writer, relay_init, label, dc, is_media, ctx,
                 self._stats, self._settings.fallback, splitter,
+                is_test_dc=is_test_dc,
             )
             return
 

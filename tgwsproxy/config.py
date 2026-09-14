@@ -80,6 +80,7 @@ class Config:
     buffer_size: int = 256 * 1024
     pool_size: int = 4
     proxy_protocol: bool = False
+    force_test_dc: bool = False
 
     # Cloudflare-based fallback
     cfproxy: bool = True
@@ -223,6 +224,7 @@ def _from_dict(raw: Dict[str, Any]) -> Config:
         buffer_size=int(merged["buffer_size"]),
         pool_size=int(merged["pool_size"]),
         proxy_protocol=bool(merged["proxy_protocol"]),
+        force_test_dc=bool(merged["force_test_dc"]),
         cfproxy=bool(merged["cfproxy"]),
         cfproxy_user_domain=str(merged["cfproxy_user_domain"]),
         cfproxy_worker_domain=str(merged["cfproxy_worker_domain"]),
