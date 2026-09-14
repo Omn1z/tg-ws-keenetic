@@ -6,10 +6,18 @@ passthrough = ["RUSTFLAGS", "SOURCE_DATE_EPOCH"]
 [target.mips-unknown-linux-musl]
 image = "ghcr.io/cross-rs/mips-unknown-linux-musl:main"
 build-std = ["std", "panic_abort"]
+# Tier-3 std has no bundled libunwind. The cross GCC toolchain supplies the
+# compatible GNU unwinder as libgcc_eh.a; expose it under Rust's requested name.
+pre-build = [
+    "unwinder=$(mips-linux-muslsf-gcc -print-file-name=libgcc_eh.a) && test -f \"$unwinder\" && cp \"$unwinder\" \"$(dirname \"$unwinder\")/libunwind.a\"",
+]
 
 [target.mipsel-unknown-linux-musl]
 image = "ghcr.io/cross-rs/mipsel-unknown-linux-musl:main"
 build-std = ["std", "panic_abort"]
+pre-build = [
+    "unwinder=$(mipsel-linux-muslsf-gcc -print-file-name=libgcc_eh.a) && test -f \"$unwinder\" && cp \"$unwinder\" \"$(dirname \"$unwinder\")/libunwind.a\"",
+]
 
 [target.armv5te-unknown-linux-musleabi]
 image = "ghcr.io/cross-rs/armv5te-unknown-linux-musleabi:main"

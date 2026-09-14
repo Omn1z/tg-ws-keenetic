@@ -61,6 +61,7 @@ if [[ "$backend" = native ]]; then
 fi
 binary="target/$target/release/tgwsproxy"
 file "$binary" | tee -a "dist/build-$arch.txt"
+readelf -h -A "$binary" >> "dist/build-$arch.txt"
 # Reject silently dynamic executables (including a dynamic OpenSSL dependency).
 program_headers=$(readelf -l "$binary")
 dynamic_headers=$(readelf -d "$binary")
@@ -102,6 +103,22 @@ while IFS=$'\t' read -r name manifest; do
     fi
 done < "$package/dependency-paths.tsv"
 test -s "$package/licenses/OpenSSL-LICENSE.txt"
+case "$arch" in
+    mips|mipsel)
+        # The Tier-3 std build uses the cross image's GCC 9.2 static unwinder.
+        # Ship the exact upstream license texts, checked against known hashes.
+        gcc_source=https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-9.2.0
+        wget -qO "$package/licenses/GCC-COPYING3" "$gcc_source/COPYING3"
+        wget -qO "$package/licenses/GCC-COPYING.RUNTIME" "$gcc_source/COPYING.RUNTIME"
+        (
+            cd "$package/licenses"
+            printf '%s\n' \
+                '8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903  GCC-COPYING3' \
+                '9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74  GCC-COPYING.RUNTIME' \
+                | sha256sum -c -
+        )
+        ;;
+esac
 rm "$package/dependencies.json" "$package/dependency-paths.tsv"
 chmod 755 "$package/tgwsproxy" "$package/"*.sh "$package/etc/init.d/"*
 tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
