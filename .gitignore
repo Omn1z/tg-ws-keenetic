@@ -25,6 +25,7 @@ Thumbs.db
 config.json
 
 # Local dev scratch
+/docs/
 _reference/
 _stub_check*/
 _dev_*.py

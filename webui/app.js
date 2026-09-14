@@ -1,6 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id), form=$('settings');
-let csrf='',loaded=false,busy=false,timer;
+let csrf='',loaded=false,busy=false,timer,refreshing=null;
+const STATS_INTERVAL_MS=2000;
 let updateInfo=null,updateTimer,updateCall=false,updateActive=false,updateDeadline=0,updateTarget='',updateChecked=false,reloading=false;
 const numbers=['port','max_connections','buffer_size','pool_size','connect_timeout_secs','idle_timeout_secs'];
 const booleans=['cfproxy','domain_refresh','sni_fronting','force_test_dc','proxy_protocol'];
@@ -44,8 +45,10 @@ function populate(cfg,passwordSet){
   $('auth-note').textContent=passwordSet?'Пароль установлен. Пустое поле сохраняет текущий пароль.':'Пароль не установлен. Панель доступна устройствам локальной сети.';
   $('fields').disabled=false;
 }
-async function refresh(reset=false){
-  try{const data=await request('/api/state');csrf=data.csrf;const s=data.stats;
+function refresh(reset=false){if(refreshing)return reset?refreshing.then(()=>refresh(true)):refreshing;refreshing=refreshState(reset).finally(()=>{refreshing=null;});return refreshing;}
+async function refreshState(reset=false){
+  try{const data=await request('/api/state',undefined,5000);csrf=data.csrf;const s=data.stats;
+    document.title=`↑ ${bytes(s.bytes_up)} · ↓ ${bytes(s.bytes_down)}`;
     $('status').textContent='Работает';$('led').className='on';$('version').textContent=version(data.version);
     $('link').textContent=data.link;$('open').href=data.link;$('open').setAttribute('aria-disabled','false');
     $('active').textContent=s.connections_active;$('total').textContent=`Всего ${s.connections_total}`;
@@ -53,7 +56,7 @@ async function refresh(reset=false){
     $('routes').textContent=`WS ${s.connections_ws} · CF ${s.connections_cfproxy} · TCP ${s.connections_tcp_fallback}`;
     if(!loaded||reset){populate(data.config,data.password_set);loaded=true;}
     if(finishUpdate(data.version))return;if(data.update)renderUpdate(data.update);else updateControls();if(!updateChecked)checkUpdate();
-  }catch(error){$('status').textContent='Нет связи';$('led').className='off';if(!loaded)notice(error.message,true);}
+  }catch(error){document.title='↑ — · ↓ — · нет связи';$('status').textContent='Нет связи';$('led').className='off';if(!loaded)notice(error.message,true);}
 }
 function payload(){const cfg={};for(const n of numbers)cfg[n]=Number(field(n).value);for(const n of strings)cfg[n]=field(n).value.trim();for(const n of booleans)cfg[n]=field(n).checked;for(const n of lists)cfg[n]=field(n).value.split(/[\s,;]+/).filter(Boolean);cfg.dc_redirects={};for(const line of field('dc_redirects').value.split('\n').map(s=>s.trim()).filter(Boolean)){const match=line.match(/^(\d+)\s*:\s*(.+)$/);if(!match)throw Error(`Неверная запись DC: ${line}`);cfg.dc_redirects[match[1]]=match[2];}if($('clear-password').checked)cfg.web_password='';else if(field('web_password').value)cfg.web_password=field('web_password').value;return cfg;}
 async function change(path,body){if(busy||updateActive||updateInfo?.running)return;busy=true;$('fields').disabled=true;updateControls();notice('Применение…');try{await request(path,body);await refresh(true);notice('Готово. Настройки применены.');}catch(error){notice(error.message,true);}finally{busy=false;$('fields').disabled=!loaded;updateControls();}}
@@ -63,6 +66,7 @@ $('check-update').addEventListener('click',()=>checkUpdate(true));
 $('install-update').addEventListener('click',installUpdate);
 $('new-secret').addEventListener('click',()=>{if(confirm('Создать новый секрет? Старую ссылку потребуется заменить на всех устройствах.'))change('/api/secret',{});});
 $('copy').addEventListener('click',async()=>{const link=$('link').textContent;if(!loaded)return;try{await navigator.clipboard.writeText(link);notice('Ссылка скопирована.');}catch{const input=document.createElement('textarea');input.value=link;input.setAttribute('readonly','');document.body.append(input);input.select();const copied=document.execCommand('copy');input.remove();notice(copied?'Ссылка скопирована.':'Выделите и скопируйте ссылку вручную.',!copied);}});
-function schedule(){clearTimeout(timer);if(document.hidden)return;timer=setTimeout(async()=>{if(!busy)await refresh();schedule();},5000);}
+// Keep the tab counters live in the background; the browser may throttle timers.
+function schedule(){clearTimeout(timer);timer=setTimeout(async()=>{if(!busy)await refresh();schedule();},STATS_INTERVAL_MS);}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!busy)refresh();schedule();scheduleUpdate();});
 refresh().then(schedule);

@@ -2,7 +2,7 @@ name: Rust checks and router releases
 
 on:
   push:
-    branches: [rust, main]
+    branches: [main]
     tags: ['v*.*.*']
   pull_request:
   workflow_dispatch:
@@ -106,9 +106,14 @@ jobs:
         run: |
           cp scripts/install.sh scripts/uninstall.sh dist/
           cd dist
+          for arch in mips mipsel arm armv7 aarch64 x86_64; do
+            test -s "tgwsproxy-$arch.tar.gz"
+            test -s "build-$arch.txt"
+          done
           sha256sum tgwsproxy-*.tar.gz install.sh uninstall.sh build-*.txt > SHA256SUMS
+          sha256sum -c SHA256SUMS
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes
+        run: gh release create "$TAG" dist/* --verify-tag --latest --title "$TAG" --generate-notes
