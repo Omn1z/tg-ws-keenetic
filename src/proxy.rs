@@ -150,30 +150,71 @@ async fn serve(
     secret: &[u8; 16],
     replay: &ReplayCache,
 ) -> io::Result<()> {
+    let peer = socket
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| "unknown".into());
     socket.set_nodelay(true)?;
     let sock = socket2::SockRef::from(&socket);
     let _ = sock.set_recv_buffer_size(config.buffer_size);
     let _ = sock.set_send_buffer_size(config.buffer_size);
-    let Some((mut client, handshake)) = initial(socket, config, &stats, secret, replay).await?
-    else {
+    let Some((mut client, handshake)) = (match initial(socket, config, &stats, secret, replay).await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if config.verbose {
+                eprintln!("tgws: client={peer} handshake failed: {error}");
+            }
+            return Err(error);
+        }
+    }) else {
         return Ok(());
     };
     let parsed = match crypto::parse_client_handshake(&handshake, secret) {
         Ok(p) => p,
         Err(e) => {
             stats.bad();
+            if config.verbose {
+                eprintln!("tgws: client={peer} invalid handshake: {e}");
+            }
             return Err(e);
         }
     };
-    let (dc, media, test) = normalize_dc(parsed.dc_index, config.force_test_dc)?;
+    let (dc, media, test) = match normalize_dc(parsed.dc_index, config.force_test_dc) {
+        Ok(value) => value,
+        Err(error) => {
+            if config.verbose {
+                eprintln!(
+                    "tgws: client={peer} invalid DC {}: {error}",
+                    parsed.dc_index
+                );
+            }
+            return Err(error);
+        }
+    };
+    if config.verbose {
+        eprintln!("tgws: client={peer} dc={dc} media={media} test={test}");
+    }
     let mut relay = crypto::generate_relay_handshake(parsed.protocol, if media { -dc } else { dc });
     let context = crypto::build_context(&parsed, secret, &relay);
     let idle = Duration::from_secs(config.idle_timeout_secs);
-    match upstream.connect(dc, media, test).await? {
+    let route = match upstream.connect(dc, media, test).await {
+        Ok(route) => route,
+        Err(error) => {
+            if config.verbose {
+                eprintln!("tgws: client={peer} upstream failed: {error}");
+            }
+            return Err(error);
+        }
+    };
+    match route {
         Route::WebSocket(ws, packetized) => {
+            if config.verbose {
+                eprintln!("tgws: client={peer} route=websocket packetized={packetized}");
+            }
             let (reader, writer) = ws.split();
             writer.lock().await.binary(&mut relay).await?;
-            bridge_ws(
+            let result = bridge_ws(
                 &mut client,
                 reader,
                 writer,
@@ -184,13 +225,23 @@ async fn serve(
                 config.buffer_size,
                 idle,
             )
-            .await
+            .await;
+            if config.verbose {
+                eprintln!(
+                    "tgws: client={peer} websocket closed: {}",
+                    format_result(&result)
+                );
+            }
+            result
         }
         Route::Tcp(mut remote) => {
+            if config.verbose {
+                eprintln!("tgws: client={peer} route=tcp");
+            }
             timeout(idle, remote.write_all(&relay))
                 .await
                 .map_err(websocket::timed_out)??;
-            bridge_tcp(
+            let result = bridge_tcp(
                 &mut client,
                 &mut remote,
                 context,
@@ -198,8 +249,19 @@ async fn serve(
                 config.buffer_size,
                 idle,
             )
-            .await
+            .await;
+            if config.verbose {
+                eprintln!("tgws: client={peer} tcp closed: {}", format_result(&result));
+            }
+            result
         }
+    }
+}
+
+fn format_result(result: &io::Result<()>) -> String {
+    match result {
+        Ok(()) => "cleanly".into(),
+        Err(error) => error.to_string(),
     }
 }
 

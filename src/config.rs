@@ -2,8 +2,8 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io, net::IpAddr, path::Path};
 
-pub const UPSTREAM_VERSION: &str = "1.10.2";
-pub const UPSTREAM_COMMIT: &str = "f200e33fd283143a9f101d62aaf9d8c1468a23fe";
+pub const UPSTREAM_VERSION: &str = "1.10.4";
+pub const UPSTREAM_COMMIT: &str = "70b982da2ca75637b61f281170e4ed57df763db8";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,6 +23,10 @@ pub struct Config {
     pub force_test_dc: bool,
     pub sni_fronting: bool,
     pub cfproxy: bool,
+    /// Use plain WebSocket (port 80) for CF/Worker fallback routes.
+    /// Direct Telegram routes always keep TLS regardless of this flag.
+    #[serde(alias = "no_secure")]
+    pub disable_secure: bool,
     pub cfproxy_user_domains: Vec<String>,
     pub cfproxy_worker_domains: Vec<String>,
     pub domain_refresh: bool,
@@ -54,6 +58,7 @@ impl Default for Config {
             force_test_dc: false,
             sni_fronting: false,
             cfproxy: true,
+            disable_secure: false,
             cfproxy_user_domains: vec![],
             cfproxy_worker_domains: vec![],
             domain_refresh: true,
@@ -297,9 +302,12 @@ mod tests {
             .unwrap()
             .remove("cfproxy_user_domains");
         value["cfproxy_user_domain"] = "one.example, two.example".into();
+        value.as_object_mut().unwrap().remove("disable_secure");
+        value["no_secure"] = true.into();
         value["log_max_mb"] = 5.into();
         let loaded = Config::from_value(value.clone()).unwrap();
         assert_eq!(loaded.cfproxy_user_domains, ["one.example", "two.example"]);
+        assert!(loaded.disable_secure);
         assert_eq!(loaded.secret, config().secret);
         assert_eq!(loaded.extra["log_max_mb"], 5);
         value["cfproxy_user_domains"] = serde_json::json!([]);

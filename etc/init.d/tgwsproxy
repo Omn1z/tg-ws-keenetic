@@ -3,6 +3,16 @@
 START=99
 STOP=10
 USE_PROCD=1
+if [ -z "${SSL_CERT_FILE:-}" ] && [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+elif [ -z "${SSL_CERT_FILE:-}" ] && [ -f /opt/etc/ssl/certs/ca-certificates.crt ]; then
+    export SSL_CERT_FILE=/opt/etc/ssl/certs/ca-certificates.crt
+fi
+if [ -z "${SSL_CERT_DIR:-}" ]; then
+    if [ -d /etc/ssl/certs ]; then export SSL_CERT_DIR=/etc/ssl/certs
+    elif [ -d /opt/etc/ssl/certs ]; then export SSL_CERT_DIR=/opt/etc/ssl/certs
+    fi
+fi
 start_service() {
     /usr/bin/tgwsproxy --config /etc/tgwsproxy/config.json --check-config || return 1
     procd_open_instance

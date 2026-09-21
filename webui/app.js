@@ -4,7 +4,7 @@ let csrf='',loaded=false,busy=false,timer,refreshing=null;
 const STATS_INTERVAL_MS=2000;
 let updateInfo=null,updateTimer,updateCall=false,updateActive=false,updateDeadline=0,updateTarget='',updateChecked=false,reloading=false;
 const numbers=['port','max_connections','buffer_size','pool_size','connect_timeout_secs','idle_timeout_secs'];
-const booleans=['cfproxy','domain_refresh','sni_fronting','force_test_dc','proxy_protocol'];
+const booleans=['cfproxy','disable_secure','domain_refresh','sni_fronting','force_test_dc','proxy_protocol'];
 const strings=['link_host','fake_tls_domain','web_user'];
 const lists=['cfproxy_user_domains','cfproxy_worker_domains'];
 const field=name=>form.elements.namedItem(name);

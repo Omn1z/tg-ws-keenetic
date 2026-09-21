@@ -2,7 +2,14 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
 use sha1::{Digest, Sha1};
-use std::{collections::BTreeMap, io, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadHalf, WriteHalf},
     net::TcpStream,
@@ -13,7 +20,58 @@ use tokio_native_tls::{TlsConnector, TlsStream};
 
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024 + 4;
 const HEADER_LIMIT: usize = 16 * 1024;
-pub type Wire = BufReader<TlsStream<TcpStream>>;
+
+/// The fallback domains can optionally use an unencrypted WebSocket on port 80.
+/// Keeping the transport as a small enum avoids pulling in a type-erasure crate or
+/// allocating a boxed trait object on every connection.
+#[allow(clippy::large_enum_variant)]
+pub enum Transport {
+    Tls(TlsStream<TcpStream>),
+    Plain(TcpStream),
+}
+
+impl AsyncRead for Transport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        // Both transport types are Unpin, so matching through get_mut() is safe.
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for Transport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream).poll_write(cx, data),
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, data),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+pub type Wire = BufReader<Transport>;
 pub type SharedWriter = Arc<Mutex<WsWriter<WriteHalf<Wire>>>>;
 
 fn invalid(message: &str) -> io::Error {
@@ -51,6 +109,37 @@ impl WebSocket {
         domain: &str,
         sni: &str,
         path: &str,
+        // `false` selects plain HTTP/WebSocket on port 80. It is intended only
+        // for the explicitly configured CF/Worker fallback routes.
+        secure: bool,
+        connect_limit: Duration,
+        idle: Duration,
+        buffer_size: usize,
+    ) -> io::Result<Self> {
+        Self::connect_port(
+            connector,
+            host,
+            domain,
+            sni,
+            path,
+            secure,
+            if secure { 443 } else { 80 },
+            connect_limit,
+            idle,
+            buffer_size,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn connect_port(
+        connector: &TlsConnector,
+        host: &str,
+        domain: &str,
+        sni: &str,
+        path: &str,
+        secure: bool,
+        port: u16,
         connect_limit: Duration,
         idle: Duration,
         buffer_size: usize,
@@ -62,13 +151,17 @@ impl WebSocket {
             return Err(invalid("invalid WebSocket request target"));
         }
         timeout(connect_limit, async {
-            let tcp = TcpStream::connect((host, 443)).await?;
+            let tcp = TcpStream::connect((host, port)).await?;
             tcp.set_nodelay(true)?;
             let socket = socket2::SockRef::from(&tcp);
             let _ = socket.set_recv_buffer_size(buffer_size);
             let _ = socket.set_send_buffer_size(buffer_size);
-            let tls = connector.connect(sni, tcp).await.map_err(io::Error::other)?;
-            let mut wire = BufReader::with_capacity(4096, tls);
+            let transport = if secure {
+                Transport::Tls(connector.connect(sni, tcp).await.map_err(io::Error::other)?)
+            } else {
+                Transport::Plain(tcp)
+            };
+            let mut wire = BufReader::with_capacity(4096, transport);
             let mut random = [0; 16];
             rand::thread_rng().fill_bytes(&mut random);
             let key = STANDARD.encode(random);
@@ -361,6 +454,59 @@ impl<R: AsyncRead + Unpin> WsReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn plain_websocket_performs_http_upgrade_without_tls() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                socket.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+                assert!(request.len() <= HEADER_LIMIT);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /plain HTTP/1.1\r\n"));
+            assert!(request.contains("Host: fallback.example\r\n"));
+            let key = request
+                .lines()
+                .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+                .unwrap();
+            let accept = STANDARD.encode(Sha1::digest(format!(
+                "{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+            )));
+            let response = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: binary\r\n\r\n"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let connector: TlsConnector = native_tls::TlsConnector::builder().build().unwrap().into();
+        let socket = WebSocket::connect_port(
+            &connector,
+            "127.0.0.1",
+            "fallback.example",
+            "unused.example",
+            "/plain",
+            false,
+            port,
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+            4096,
+        )
+        .await
+        .unwrap();
+        drop(socket);
+        server.await.unwrap();
+    }
+
     #[test]
     fn validates_rfc_upgrade_proof() {
         let h = BTreeMap::from([

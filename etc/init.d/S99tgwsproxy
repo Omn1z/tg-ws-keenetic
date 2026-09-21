@@ -6,6 +6,14 @@ CONFIG=/opt/etc/tgwsproxy/config.json
 PIDFILE=/opt/var/run/tgwsproxy.pid
 LOGFILE=/tmp/tgwsproxy.log
 umask 077
+if [ -z "${SSL_CERT_FILE:-}" ] && [ -f /opt/etc/ssl/certs/ca-certificates.crt ]; then
+    SSL_CERT_FILE=/opt/etc/ssl/certs/ca-certificates.crt
+    export SSL_CERT_FILE
+fi
+if [ -z "${SSL_CERT_DIR:-}" ] && [ -d /opt/etc/ssl/certs ]; then
+    SSL_CERT_DIR=/opt/etc/ssl/certs
+    export SSL_CERT_DIR
+fi
 running() {
     [ -f "$PIDFILE" ] || return 1
     pid=$(cat "$PIDFILE" 2>/dev/null)

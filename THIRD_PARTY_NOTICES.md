@@ -1,7 +1,7 @@
 # Third-party notices
 
 This project contains a Rust port of network behavior from Flowseal/tg-ws-proxy
-v1.10.2, revision f200e33fd283143a9f101d62aaf9d8c1468a23fe (MIT), and references
+v1.10.4, revision 70b982da2ca75637b61f281170e4ed57df763db8 (MIT), and references
 the Go router port in Omn1z/nfqws2-keenetic-strategy-selector. The original
 upstream license is reproduced in LICENSE.upstream.
 

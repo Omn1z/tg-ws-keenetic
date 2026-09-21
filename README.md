@@ -25,9 +25,9 @@ MTProto → WebSocket прокси Telegram **на самом роутере**. 
 на роутере. Основная ветка `main` содержит Rust-версию; прежняя реализация на
 Python сохранена в [legacy-py](https://github.com/Omn1z/tg-ws-keenetic/tree/legacy-py).
 
-Сетевой протокол перенесён из [Flowseal/tg-ws-proxy v1.10.2](https://github.com/Flowseal/tg-ws-proxy/tree/v1.10.2),
-коммит `f200e33fd283143a9f101d62aaf9d8c1468a23fe` от 7 сентября 2026 года.
-На 14 сентября это последний релиз и HEAD upstream. Для сверки также использованы
+Сетевой протокол перенесён из [Flowseal/tg-ws-proxy v1.10.4](https://github.com/Flowseal/tg-ws-proxy/tree/v1.10.4),
+коммит `70b982da2ca75637b61f281170e4ed57df763db8` от 19 сентября 2026 года.
+Это последний релиз и HEAD upstream на момент подготовки сборки. Для сверки также использованы
 наработки [NFQWS2 Strategy Selector](https://github.com/Omn1z/nfqws2-keenetic-strategy-selector).
 Это самостоятельный сервис: NFQWS2 для его запуска не требуется.
 
@@ -41,10 +41,21 @@ Python сохранена в [legacy-py](https://github.com/Omn1z/tg-ws-keenetic
 Подробности, установка выбранной версии, локального бинарника и удаление —
 [INSTALL.md](INSTALL.md).
 
+Для чистого Entware установщик проверяет и при необходимости устанавливает
+`ca-bundle`. Если пакетный менеджер недоступен, выполните вручную:
+
+```sh
+opkg update && opkg install wget-ssl ca-bundle
+```
+
+Релизный бинарник статический: `libopenssl`, `libnghttp2` и `curl` для него не
+нужны. При `"verbose": true` подробности маршрута и ошибок идут в stderr;
+Entware сохраняет их в `/tmp/tgwsproxy.log`, OpenWrt — в `logread -e tgwsproxy`.
+
 Проверено на Keenetic ARM64: установка и перезапуск с сохранением настроек,
 встроенная панель и настоящий обмен MTProto с Telegram DC2/DC4 через WebSocket.
-У сборки 2.1.0 бинарник с TLS занимает 5,34 МиБ, RSS после короткой проверки
-при двух активных клиентах — около 6,91 МиБ. Это не замер длительной нагрузки
+В предыдущем замере на Keenetic ARM64 бинарник с TLS занимал 5,34 МиБ, RSS после
+короткой проверки при двух активных клиентах — около 6,91 МиБ. Это не замер длительной нагрузки
 и не оценка потребления на MIPS; размеры каждого релиза приведены в `build-<arch>.txt`.
 
 ## Что изменилось
@@ -71,6 +82,8 @@ Python сохранена в [legacy-py](https://github.com/Omn1z/tg-ws-keenetic
 - **Актуальные маршруты**: media DC, автоматические/принудительные тестовые DC,
   `/apiws_test`, CF proxy/Worker списки, резервный TCP, SNI fronting, обновление
   резервных доменов раз в час, восстановление пула и задержки повторных попыток.
+  Для CF proxy и Worker можно включить обычный WebSocket через порт 80 (`disable_secure`);
+  прямые Telegram-маршруты и обновление списка доменов остаются на TLS.
 - **Fake TLS**, PROXY protocol v1, WebSocket continuation, ping/pong,
   проверка HTTP Upgrade и потоковое маскирование кадров.
 
@@ -146,6 +159,7 @@ HTTP Basic Auth не шифрует соединение. POST-запросы з
 | `idle_timeout_secs` | `300` | Таймаут отсутствия трафика |
 | `dc_redirects` | DC2/DC4 → `149.154.167.220` | IP для прямого WS; `{}` включает только fallback |
 | `cfproxy` | `true` | Использовать резервные CF-домены |
+| `disable_secure` | `false` | CF/Worker через обычный WS на порту 80; прямые маршруты остаются TLS |
 | `cfproxy_user_domains` | `[]` | Свои CF-домены; пусто — встроенный список |
 | `cfproxy_worker_domains` | `[]` | Свои Worker-домены |
 | `domain_refresh` | `true` | Ежечасное обновление встроенного списка |
@@ -195,14 +209,15 @@ AES/CTR/SHA-256 сохраняют `opt-level=3`. TLS использует OpenS
 ветки `main` и отправьте его в GitHub. Workflow публикует архивы, установщик и
 `SHA256SUMS` только для тега; `workflow_dispatch` позволяет сначала проверить сборки.
 
-Версия в панели берётся из `Cargo.toml` при сборке: `2.1.1` отображается
-как `v2.1.1`. Тег должен совпадать с версией сборки; workflow проверяет это
+Версия в панели берётся из `Cargo.toml` при сборке: `2.2.0` отображается
+как `v2.2.0`. Тег должен совпадать с версией сборки; workflow проверяет это
 до публикации. Следующее обновление требует большей версии и нового тега.
 После успешной сборки всех шести архитектур релиз становится последним
 стабильным выпуском для установщика и панели.
 
 CLI: `--config PATH`, `--init-config`, `--check-config`, `--print-link`,
-`--no-webui`, `--version`. Обычный запуск работает в foreground.
+`--no-webui`, `--no-secure`, `--dc-ip [DC:IP]`, `--version`. Обычный запуск
+работает в foreground; bare `--dc-ip` очищает стандартные прямые DC-редиректы.
 
 ## Лицензия
 

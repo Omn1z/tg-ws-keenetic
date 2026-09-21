@@ -111,6 +111,7 @@ impl Upstream {
     fn connect_limit(&self) -> Duration {
         Duration::from_secs(self.config.connect_timeout_secs)
     }
+    #[allow(clippy::too_many_arguments)]
     async fn ws(
         &self,
         host: &str,
@@ -118,6 +119,7 @@ impl Upstream {
         sni: &str,
         path: &str,
         direct: bool,
+        secure: bool,
         limit: Duration,
     ) -> io::Result<WebSocket> {
         WebSocket::connect(
@@ -126,6 +128,7 @@ impl Upstream {
             domain,
             sni,
             path,
+            secure,
             limit,
             self.idle(),
             self.config.buffer_size,
@@ -149,6 +152,9 @@ impl Upstream {
             self.stats.ws();
             return Ok(Route::WebSocket(socket, true));
         }
+        if self.config.verbose {
+            eprintln!("tgws: dc={dc} direct WebSocket unavailable; trying fallbacks");
+        }
         let target = fallback_ip(dc, test).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "unsupported Telegram DC")
         })?;
@@ -162,16 +168,33 @@ impl Upstream {
                 self.stats.cf();
                 return Ok(Route::WebSocket(socket, false));
             }
-            if let Ok(Ok(socket)) = timeout(Duration::from_secs(15), self.worker(dc, target)).await
-            {
-                self.stats.cf();
-                return Ok(Route::WebSocket(socket, false));
+            match timeout(Duration::from_secs(15), self.worker(dc, target)).await {
+                Ok(Ok(socket)) => {
+                    self.stats.cf();
+                    return Ok(Route::WebSocket(socket, false));
+                }
+                Ok(Err(error)) if self.config.verbose => {
+                    eprintln!("tgws: dc={dc} Worker fallback failed: {error}");
+                }
+                Err(_) if self.config.verbose => {
+                    eprintln!("tgws: dc={dc} Worker fallback timed out");
+                }
+                _ => {}
             }
         }
         if self.config.cfproxy && !test {
-            if let Ok(Some(socket)) = timeout(Duration::from_secs(15), self.cf_route(dc)).await {
-                self.stats.cf();
-                return Ok(Route::WebSocket(socket, true));
+            match timeout(Duration::from_secs(15), self.cf_route(dc)).await {
+                Ok(Some(socket)) => {
+                    self.stats.cf();
+                    return Ok(Route::WebSocket(socket, true));
+                }
+                Ok(None) if self.config.verbose => {
+                    eprintln!("tgws: dc={dc} CF fallback exhausted");
+                }
+                Err(_) if self.config.verbose => {
+                    eprintln!("tgws: dc={dc} CF fallback timed out");
+                }
+                _ => {}
             }
         }
         let remote = timeout(self.connect_limit(), TcpStream::connect((target, 443)))
@@ -194,6 +217,7 @@ impl Upstream {
                     &domain,
                     "/apiws",
                     false,
+                    !self.config.disable_secure,
                     self.connect_limit(),
                 )
                 .await
@@ -202,7 +226,12 @@ impl Upstream {
                     self.state.lock().unwrap().preferred.insert(dc, base);
                     return Some(socket);
                 }
-                Err(_) => self.stats.ws_error(),
+                Err(error) => {
+                    self.stats.ws_error();
+                    if self.config.verbose {
+                        eprintln!("tgws: dc={dc} CF domain={domain} failed: {error}");
+                    }
+                }
             }
         }
         None
@@ -241,20 +270,23 @@ impl Upstream {
         let path = if test { "/apiws_test" } else { "/apiws" };
         let mut all_redirects = true;
         for domain in ws_domains(dc, media) {
-            match self.ws(ip, &domain, &domain, path, true, limit).await {
+            match self.ws(ip, &domain, &domain, path, true, true, limit).await {
                 Ok(socket) => {
                     self.direct_success(key, ip);
                     return Some(socket);
                 }
                 Err(error) => {
                     self.stats.ws_error();
+                    if self.config.verbose {
+                        eprintln!("tgws: dc={dc} direct domain={domain} failed: {error}");
+                    }
                     if websocket::is_redirect(&error) {
                         continue;
                     }
                     all_redirects = false;
                     if self.config.sni_fronting && should_front(&error) {
                         if let Ok(socket) = self
-                            .ws(ip, &domain, "sprinthost.ru", path, true, limit)
+                            .ws(ip, &domain, "sprinthost.ru", path, true, true, limit)
                             .await
                         {
                             self.direct_success(key, ip);
@@ -304,6 +336,7 @@ impl Upstream {
                     &domain,
                     &worker_path(dc, ip),
                     false,
+                    !self.config.disable_secure,
                     self.connect_limit(),
                 )
                 .await
@@ -312,6 +345,9 @@ impl Upstream {
                 Err(e) => {
                     self.stats.ws_error();
                     error = e;
+                    if self.config.verbose {
+                        eprintln!("tgws: dc={dc} Worker domain={domain} failed: {error}");
+                    }
                 }
             }
         }
@@ -406,7 +442,15 @@ impl Upstream {
         let mut last = io::Error::new(io::ErrorKind::NotConnected, "no direct WebSocket route");
         for domain in ws_domains(dc, media) {
             match self
-                .ws(ip, &domain, &domain, "/apiws", true, self.connect_limit())
+                .ws(
+                    ip,
+                    &domain,
+                    &domain,
+                    "/apiws",
+                    true,
+                    true,
+                    self.connect_limit(),
+                )
                 .await
             {
                 Ok(socket) => return Ok(socket),
@@ -422,6 +466,7 @@ impl Upstream {
                                 &domain,
                                 "sprinthost.ru",
                                 "/apiws",
+                                true,
                                 true,
                                 self.connect_limit(),
                             )
@@ -474,7 +519,7 @@ impl Upstream {
             let tcp=TcpStream::connect((host,443)).await?;
             let tls=self.verified.connect("raw.githubusercontent.com",tcp).await.map_err(io::Error::other)?;
             let mut wire=BufReader::with_capacity(4096,tls);
-            wire.write_all(b"GET /Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt HTTP/1.1\r\nHost: raw.githubusercontent.com\r\nUser-Agent: tgws-rust/1.10.2\r\nAccept-Encoding: identity\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
+            wire.write_all(b"GET /Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt HTTP/1.1\r\nHost: raw.githubusercontent.com\r\nUser-Agent: tgws-rust/1.10.4\r\nAccept-Encoding: identity\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
             wire.flush().await?;
             let (status,headers)=websocket::read_http_headers(&mut wire).await?;
             if status!=200 { return Err(io::Error::other(websocket::HttpError(status))); }

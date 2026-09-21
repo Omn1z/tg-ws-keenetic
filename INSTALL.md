@@ -81,13 +81,18 @@ sh /tmp/tgws-install.sh --system entware
 sh /tmp/tgws-install.sh --system openwrt
 ```
 
-Если имеющийся `wget` не поддерживает HTTPS, установите `wget-ssl` и `ca-certificates`
+Если имеющийся `wget` не поддерживает HTTPS или на системе нет доверенного хранилища,
+установите `wget-ssl` и `ca-bundle`
 через пакетный менеджер своей системы. Для Entware:
 
 ```sh
 opkg update
-opkg install wget-ssl ca-certificates
+opkg install wget-ssl ca-bundle
 ```
+
+`ca-bundle` нужен самому прокси для проверки TLS-сертификатов резервных доменов и
+обновления списков. Статический релиз не требует устанавливать `libopenssl`,
+`libnghttp2` или `curl` отдельно.
 
 Если после установки по-прежнему запускается системный `wget` без HTTPS,
 повторите команду загрузки с `/opt/bin/wget` вместо `wget`.
@@ -144,7 +149,7 @@ opkg install wget-ssl ca-certificates
 Для установки конкретной версии:
 
 ```sh
-sh /tmp/tgws-install.sh --version v2.1.1
+sh /tmp/tgws-install.sh --version v2.2.0
 ```
 
 `config.json`, secret, пароль панели и незнакомые прежние поля не
@@ -237,6 +242,11 @@ sh scripts/test-installer.sh
 ```
 
 ## Диагностика
+
+Для подробного журнала включите `"verbose": true` в конфигурации и перезапустите
+сервис. В журнале будут адрес клиента, DC, выбранный маршрут, ошибки прямого и
+резервного WebSocket, TCP fallback и причины закрытия соединения. Entware пишет
+stderr в `/tmp/tgwsproxy.log`, OpenWrt — в системный журнал.
 
 ```sh
 # Entware

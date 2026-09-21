@@ -70,6 +70,32 @@ case "$SYSTEM" in
     entware) BIN_DIR=$ROOT/opt/bin; CONFIG_DIR=$ROOT/opt/etc/tgwsproxy; INIT=$ROOT/opt/etc/init.d/S99tgwsproxy; TEMPLATE=S99tgwsproxy; RUN_DIR=$ROOT/opt/var/run ;;
     *) die "Unknown system: $SYSTEM" ;;
 esac
+ensure_ca_bundle() {
+    [ -n "$ROOT" ] && return 0
+    # Static OpenSSL still needs a trust store for verified CF/GitHub TLS.
+    for bundle in /opt/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/ssl/certs/ca-bundle.crt; do
+        [ -s "$bundle" ] && return 0
+    done
+    case "$SYSTEM" in
+        entware) OPKG=/opt/bin/opkg ;;
+        openwrt) OPKG=/sbin/opkg; [ -x "$OPKG" ] || OPKG=$(command -v opkg 2>/dev/null || true) ;;
+    esac
+    if [ -x "${OPKG:-}" ]; then
+        say "CA bundle is missing; installing ca-bundle"
+        "$OPKG" install ca-bundle >/dev/null 2>&1 || {
+            "$OPKG" update >/dev/null 2>&1 || die "Cannot update package lists. Install ca-bundle manually and retry."
+            "$OPKG" install ca-bundle >/dev/null 2>&1 || die "Cannot install ca-bundle. Install it manually and retry."
+        }
+    fi
+    for bundle in /opt/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/ssl/certs/ca-bundle.crt; do
+        [ -s "$bundle" ] && return 0
+    done
+    if [ "$SYSTEM" = entware ]; then
+        die "CA bundle is missing. Install it with: /opt/bin/opkg update && /opt/bin/opkg install ca-bundle"
+    fi
+    die "CA bundle is missing. Install the ca-bundle package and retry."
+}
+ensure_ca_bundle
 BIN=$BIN_DIR/tgwsproxy
 CONFIG=$CONFIG_DIR/config.json
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$(dirname "$INIT")" "$RUN_DIR"
@@ -107,11 +133,11 @@ fetch() {
     elif command -v wget >/dev/null 2>&1; then
         WGET=$(command -v wget)
     else
-        die "HTTPS wget is missing. On Entware run: opkg install wget-ssl ca-certificates; then use /opt/bin/wget"
+        die "HTTPS wget is missing. On Entware run: opkg install wget-ssl ca-bundle; then use /opt/bin/wget"
     fi
     # Shared BusyBox/GNU wget flags. Keep certificate verification enabled.
     "$WGET" -O "$2" "$1" || {
-        say "Download failed using $WGET. Check URL, network, clock and CA certificates. For HTTPS on Entware: opkg install wget-ssl ca-certificates; use /opt/bin/wget." >&2
+        say "Download failed using $WGET. Check URL, network, clock and CA certificates. For HTTPS on Entware: opkg install wget-ssl ca-bundle; use /opt/bin/wget." >&2
         return 1
     }
 }
