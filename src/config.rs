@@ -2,8 +2,8 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io, net::IpAddr, path::Path};
 
-pub const UPSTREAM_VERSION: &str = "1.10.4";
-pub const UPSTREAM_COMMIT: &str = "70b982da2ca75637b61f281170e4ed57df763db8";
+pub const UPSTREAM_VERSION: &str = "1.11.1";
+pub const UPSTREAM_COMMIT: &str = "18175fb4fe567cf6aef61f9d883eff010c9e66a8";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,6 +23,9 @@ pub struct Config {
     pub force_test_dc: bool,
     pub sni_fronting: bool,
     pub cfproxy: bool,
+    /// Multiplex production media traffic over the persistent CF HTTP/2 lane.
+    #[serde(alias = "h2")]
+    pub cfproxy_h2_media: bool,
     /// Use plain WebSocket (port 80) for CF/Worker fallback routes.
     /// Direct Telegram routes always keep TLS regardless of this flag.
     #[serde(alias = "no_secure")]
@@ -58,6 +61,7 @@ impl Default for Config {
             force_test_dc: false,
             sni_fronting: false,
             cfproxy: true,
+            cfproxy_h2_media: true,
             disable_secure: false,
             cfproxy_user_domains: vec![],
             cfproxy_worker_domains: vec![],
@@ -107,6 +111,10 @@ pub fn valid_domain(domain: &str) -> bool {
 }
 
 impl Config {
+    pub fn h2_enabled(&self) -> bool {
+        self.cfproxy_h2_media && self.cfproxy && !self.disable_secure && !self.force_test_dc
+    }
+
     pub fn from_value(mut value: serde_json::Value) -> io::Result<Self> {
         let map = value
             .as_object_mut()
@@ -315,6 +323,24 @@ mod tests {
             .unwrap()
             .cfproxy_user_domains
             .is_empty());
+    }
+    #[test]
+    fn h2_alias_and_route_guards_match_upstream() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value.as_object_mut().unwrap().remove("cfproxy_h2_media");
+        value["h2"] = false.into();
+        assert!(!Config::from_value(value).unwrap().cfproxy_h2_media);
+
+        let mut cfg = config();
+        assert!(cfg.h2_enabled());
+        cfg.disable_secure = true;
+        assert!(!cfg.h2_enabled());
+        cfg.disable_secure = false;
+        cfg.force_test_dc = true;
+        assert!(!cfg.h2_enabled());
+        cfg.force_test_dc = false;
+        cfg.cfproxy = false;
+        assert!(!cfg.h2_enabled());
     }
     #[test]
     fn rejects_invalid_secret_limits_and_header_injection() {

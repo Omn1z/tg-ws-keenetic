@@ -1,14 +1,15 @@
 # Third-party notices
 
 This project contains a Rust port of network behavior from Flowseal/tg-ws-proxy
-v1.10.4, revision 70b982da2ca75637b61f281170e4ed57df763db8 (MIT), and references
+v1.11.1, revision 18175fb4fe567cf6aef61f9d883eff010c9e66a8 (MIT), and references
 the Go router port in Omn1z/nfqws2-keenetic-strategy-selector. The original
 upstream license is reproduced in LICENSE.upstream.
 
 Rust dependency versions and transitive dependencies are pinned in Cargo.lock.
-They include Tokio, RustCrypto AES/CTR/SHA/HMAC, rand, serde/serde_json, base64,
-subtle, socket2 and native-tls/tokio-native-tls. See each dependency's distributed
-license and Cargo package metadata for the applicable terms.
+They include Tokio, bytes, h2/http, RustCrypto AES/CTR/SHA/HMAC, rand,
+serde/serde_json, base64, subtle, socket2 and native-tls/tokio-native-tls. See
+each dependency's distributed license and Cargo package metadata for the
+applicable terms.
 
 Linux release binaries statically link OpenSSL through openssl-src. OpenSSL 3
 is licensed under Apache-2.0. The release packaging includes the OpenSSL license

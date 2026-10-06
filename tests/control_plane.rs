@@ -319,6 +319,7 @@ mod http {
             state["config"]["cfproxy_user_domains"],
             serde_json::json!(["first.example", "second.example"])
         );
+        assert_eq!(state["config"]["cfproxy_h2_media"], true);
         let original_secret = state["config"]["secret"].clone();
         let csrf = state["csrf"].as_str().unwrap();
         // A development checkout cannot replace a managed router executable.
@@ -400,7 +401,7 @@ mod http {
             &host,
             Some("testpassword"),
             Some(csrf),
-            Some(&serde_json::json!({"host":"127.0.0.1"})),
+            Some(&serde_json::json!({"host":"127.0.0.1", "cfproxy_h2_media":false})),
         )
         .unwrap();
         assert_eq!(
@@ -437,6 +438,7 @@ mod http {
         assert_eq!(saved["port"], next_port);
         assert_eq!(saved["secret"], original_secret);
         assert_eq!(saved["web_password"], "testpassword");
+        assert_eq!(saved["cfproxy_h2_media"], false);
         assert_eq!(saved["legacy_option"], 7);
         assert_eq!(
             saved["cfproxy_user_domains"],

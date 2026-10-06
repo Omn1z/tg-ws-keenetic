@@ -9,6 +9,10 @@ struct Counters {
     connections_masked: u64,
     connections_ws: u64,
     connections_cfproxy: u64,
+    connections_h2: u64,
+    h2_tcp_connections: u64,
+    h2_requests: u64,
+    h2_errors: u64,
     connections_tcp_fallback: u64,
     connections_fronting: u64,
     rejected: u64,
@@ -57,6 +61,10 @@ impl Stats {
     increment!(masked, connections_masked);
     increment!(ws, connections_ws);
     increment!(cf, connections_cfproxy);
+    increment!(h2, connections_h2);
+    increment!(h2_tcp, h2_tcp_connections);
+    increment!(h2_request, h2_requests);
+    increment!(h2_error, h2_errors);
     increment!(tcp, connections_tcp_fallback);
     increment!(fronting, connections_fronting);
     increment!(rejected, rejected);

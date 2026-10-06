@@ -15,6 +15,7 @@
   "idle_timeout_secs": 300,
   "proxy_protocol": false,
   "cfproxy": true,
+  "cfproxy_h2_media": true,
   "disable_secure": false,
   "cfproxy_user_domains": [],
   "cfproxy_worker_domains": [],

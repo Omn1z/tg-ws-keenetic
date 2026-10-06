@@ -1,3 +1,4 @@
+mod cf_h2;
 mod config;
 mod crypto;
 mod fake_tls;
@@ -26,6 +27,27 @@ pub struct Change {
     pub reply: oneshot::Sender<Result<(), String>>,
 }
 
+#[derive(Clone, Default)]
+struct RuntimeOverrides {
+    dc_redirects: Option<BTreeMap<i16, String>>,
+    no_secure: bool,
+    no_h2: bool,
+}
+
+impl RuntimeOverrides {
+    fn apply(&self, config: &mut Config) {
+        if let Some(redirects) = &self.dc_redirects {
+            config.dc_redirects = redirects.clone();
+        }
+        if self.no_secure {
+            config.disable_secure = true;
+        }
+        if self.no_h2 {
+            config.cfproxy_h2_media = false;
+        }
+    }
+}
+
 fn default_path() -> PathBuf {
     if std::path::Path::new("/opt/etc").is_dir() {
         "/opt/etc/tgwsproxy/config.json".into()
@@ -46,6 +68,7 @@ fn entry() -> io::Result<()> {
     let mut action = "run";
     let mut no_webui = false;
     let mut no_secure = false;
+    let mut no_h2 = false;
     let mut dc_ips: Option<Vec<String>> = None;
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
@@ -61,6 +84,7 @@ fn entry() -> io::Result<()> {
             "--print-link" => action = "link",
             "--no-webui" => no_webui = true,
             "--no-secure" => no_secure = true,
+            "--no-h2" => no_h2 = true,
             "--dc-ip" => {
                 // Keep the option optional without relying on Iterator::next_if,
                 // which is newer than the Rust toolchains used by some targets.
@@ -71,7 +95,7 @@ fn entry() -> io::Result<()> {
                 match value {
                     Some(value) => dc_ips.get_or_insert_with(Vec::new).push(value),
                     // A bare --dc-ip deliberately clears the built-in redirects,
-                    // matching Flowseal v1.10.4's command-line behavior.
+                    // matching Flowseal v1.11.1's command-line behavior.
                     None => dc_ips = Some(Vec::new()),
                 }
             }
@@ -85,7 +109,7 @@ fn entry() -> io::Result<()> {
                 return Ok(());
             }
             "--help" | "-h" => {
-                println!("tgwsproxy {}\n\nUsage: tgwsproxy [--config PATH] [--no-webui] [--no-secure] [--dc-ip [DC:IP]]...\n       tgwsproxy [--config PATH] --init-config|--check-config|--print-link\n\nOne process, foreground; OpenWrt procd / Entware init manages startup.\nSIGHUP reloads the saved configuration; SIGTERM shuts down.\nUpdates: run the release install.sh again.\nDefault config: {}", env!("CARGO_PKG_VERSION"), path.display());
+                println!("tgwsproxy {}\n\nUsage: tgwsproxy [--config PATH] [--no-webui] [--no-secure] [--no-h2] [--dc-ip [DC:IP]]...\n       tgwsproxy [--config PATH] --init-config|--check-config|--print-link\n\nOne process, foreground; OpenWrt procd / Entware init manages startup.\nSIGHUP reloads the saved configuration; SIGTERM shuts down.\nUpdates: run the release install.sh again.\nDefault config: {}", env!("CARGO_PKG_VERSION"), path.display());
                 return Ok(());
             }
             _ => return Err(config::invalid(format!("unknown option {arg}; use --help"))),
@@ -111,12 +135,13 @@ fn entry() -> io::Result<()> {
             format!("{}: {e}; use --init-config for first setup", path.display()),
         )
     })?;
-    if let Some(entries) = dc_ips {
-        cfg.dc_redirects = parse_dc_redirects(&entries)?;
-    }
-    if no_secure {
-        cfg.disable_secure = true;
-    }
+    let overrides = RuntimeOverrides {
+        dc_redirects: dc_ips.as_deref().map(parse_dc_redirects).transpose()?,
+        no_secure,
+        no_h2,
+    };
+    let saved_cfg = cfg.clone();
+    overrides.apply(&mut cfg);
     cfg.validate()?;
     match action {
         "check" => {
@@ -144,7 +169,7 @@ fn entry() -> io::Result<()> {
         .thread_keep_alive(std::time::Duration::from_secs(10))
         .enable_all()
         .build()?
-        .block_on(serve(cfg, path, no_webui))
+        .block_on(serve(cfg, saved_cfg, path, no_webui, overrides))
 }
 
 fn parse_dc_redirects(entries: &[String]) -> io::Result<BTreeMap<i16, String>> {
@@ -200,8 +225,16 @@ fn configure_ca_bundle(verbose: bool) {
     }
 }
 
-async fn serve(cfg: Config, path: PathBuf, no_webui: bool) -> io::Result<()> {
-    let shared = Arc::new(RwLock::new(cfg.clone()));
+async fn serve(
+    cfg: Config,
+    saved_cfg: Config,
+    path: PathBuf,
+    no_webui: bool,
+    overrides: RuntimeOverrides,
+) -> io::Result<()> {
+    // The panel edits the file-backed values. CLI flags are applied only to
+    // the effective runtime config and must never leak into config.json.
+    let shared = Arc::new(RwLock::new(saved_cfg.clone()));
     let stats = Arc::new(stats::Stats::default());
     let mut proxy = proxy::Proxy::start(Arc::new(cfg.clone()), stats.clone()).await?;
     let (_changes, mut receiver) = mpsc::channel::<Change>(4);
@@ -223,6 +256,7 @@ async fn serve(cfg: Config, path: PathBuf, no_webui: bool) -> io::Result<()> {
         cfg.max_connections
     );
     let mut current = cfg;
+    let mut current_saved = saved_cfg;
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(unix)]
@@ -241,20 +275,32 @@ async fn serve(cfg: Config, path: PathBuf, no_webui: bool) -> io::Result<()> {
                 #[cfg(not(unix))] { std::future::pending::<()>().await; }
             } => {
                 match Config::load(&path) {
-                    Ok(config) => { let (reply, _) = oneshot::channel(); Some(Change { config, reply }) }
+                    Ok(config) => { let (reply, _) = oneshot::channel(); Some((Change { config, reply }, false)) }
                     Err(error) => { eprintln!("reload refused: {error}"); None }
                 }
             },
-            change = receiver.recv() => change,
+            change = receiver.recv() => change.map(|change| (change, true)),
         };
-        let Some(change) = change else {
+        let Some((mut change, persist)) = change else {
             continue;
         };
-        let result = apply(&mut proxy, &current, &change.config, &path, stats.clone()).await;
+        let saved = change.config.clone();
+        overrides.apply(&mut change.config);
+        let persistence = persist.then_some((&current_saved, &saved));
+        let result = apply(
+            &mut proxy,
+            &current,
+            &change.config,
+            persistence,
+            &path,
+            stats.clone(),
+        )
+        .await;
         match result {
             Ok(()) => {
                 current = change.config;
-                *shared.write().unwrap() = current.clone();
+                current_saved = saved;
+                *shared.write().unwrap() = current_saved.clone();
                 let _ = change.reply.send(Ok(()));
             }
             Err(error) => {
@@ -271,6 +317,7 @@ async fn apply(
     proxy: &mut proxy::Proxy,
     old: &Config,
     new: &Config,
+    persistence: Option<(&Config, &Config)>,
     path: &std::path::Path,
     stats: Arc<stats::Stats>,
 ) -> io::Result<()> {
@@ -283,20 +330,26 @@ async fn apply(
     if old.port != new.port {
         // Reserve a new port before stopping the running listener.
         let mut replacement = proxy::Proxy::start(Arc::new(new.clone()), stats).await?;
-        if let Err(error) = new.save(path) {
-            replacement.shutdown().await;
-            return Err(error);
+        if let Some((_, saved)) = persistence {
+            if let Err(error) = saved.save(path) {
+                replacement.shutdown().await;
+                return Err(error);
+            }
         }
         proxy.shutdown().await;
         *proxy = replacement;
     } else {
         // Save first so I/O failure cannot disrupt existing connections.
-        new.save(path)?;
+        if let Some((_, saved)) = persistence {
+            saved.save(path)?;
+        }
         proxy.shutdown().await;
         match proxy::Proxy::start(Arc::new(new.clone()), stats.clone()).await {
             Ok(replacement) => *proxy = replacement,
             Err(error) => {
-                let restore = old.save(path);
+                let restore = persistence
+                    .map(|(previous, _)| previous.save(path))
+                    .unwrap_or(Ok(()));
                 *proxy = proxy::Proxy::start(Arc::new(old.clone()), stats)
                     .await
                     .map_err(|e| {
@@ -312,7 +365,9 @@ async fn apply(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_dc_redirects;
+    use super::{apply, parse_dc_redirects, RuntimeOverrides};
+    use crate::config::Config;
+    use std::{collections::BTreeMap, sync::Arc};
 
     #[test]
     fn parses_and_overwrites_dc_redirects() {
@@ -330,5 +385,67 @@ mod tests {
     fn rejects_malformed_dc_redirects() {
         assert!(parse_dc_redirects(&["2".into()]).is_err());
         assert!(parse_dc_redirects(&["2:not-an-ip".into()]).is_err());
+    }
+
+    #[test]
+    fn runtime_overrides_do_not_mutate_saved_config() {
+        let overrides = RuntimeOverrides {
+            dc_redirects: Some([(2, "149.154.167.221".into())].into()),
+            no_secure: true,
+            no_h2: true,
+        };
+        let saved = Config::default();
+        let mut reloaded = saved.clone();
+        overrides.apply(&mut reloaded);
+        assert_eq!(reloaded.dc_redirects[&2], "149.154.167.221");
+        assert_eq!(reloaded.dc_redirects.len(), 1);
+        assert!(reloaded.disable_secure);
+        assert!(!reloaded.cfproxy_h2_media);
+        assert_ne!(saved.dc_redirects, reloaded.dc_redirects);
+        assert!(!saved.disable_secure);
+        assert!(saved.cfproxy_h2_media);
+    }
+
+    #[tokio::test]
+    async fn reload_only_applies_cli_overrides_in_memory() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let path = std::env::temp_dir().join(format!(
+            "tgwsproxy-reload-{}-{}.json",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let saved = Config {
+            host: "127.0.0.1".into(),
+            port,
+            web_port: if port == u16::MAX { port - 1 } else { port + 1 },
+            secret: "00".repeat(16),
+            domain_refresh: false,
+            ..Config::default()
+        };
+        saved.save(&path).unwrap();
+        let overrides = RuntimeOverrides {
+            dc_redirects: Some(BTreeMap::new()),
+            no_secure: true,
+            no_h2: true,
+        };
+        let mut effective = saved.clone();
+        overrides.apply(&mut effective);
+        let stats = Arc::new(crate::stats::Stats::default());
+        let mut proxy = crate::proxy::Proxy::start(Arc::new(effective.clone()), stats.clone())
+            .await
+            .unwrap();
+
+        apply(&mut proxy, &effective, &effective, None, &path, stats)
+            .await
+            .unwrap();
+        proxy.shutdown().await;
+
+        let reloaded = Config::load(&path).unwrap();
+        assert_eq!(reloaded.dc_redirects, saved.dc_redirects);
+        assert_eq!(reloaded.disable_secure, saved.disable_secure);
+        assert_eq!(reloaded.cfproxy_h2_media, saved.cfproxy_h2_media);
+        std::fs::remove_file(path).unwrap();
     }
 }

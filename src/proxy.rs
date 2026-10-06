@@ -1,5 +1,6 @@
 //! Admission-limited listener and constant-space MTProto bridges.
 use crate::{
+    cf_h2,
     config::Config,
     crypto::{self, AesCtr, CryptoContext, Protocol},
     fake_tls::{self, FakeTlsStream},
@@ -76,6 +77,7 @@ impl Proxy {
             // A completed shutdown guarantees every socket, guard and background dial is gone.
             jobs.abort_all();
             while jobs.join_next().await.is_some() {}
+            upstream.close().await;
         });
         Ok(Self {
             task: Some(task),
@@ -198,7 +200,7 @@ async fn serve(
     let mut relay = crypto::generate_relay_handshake(parsed.protocol, if media { -dc } else { dc });
     let context = crypto::build_context(&parsed, secret, &relay);
     let idle = Duration::from_secs(config.idle_timeout_secs);
-    let route = match upstream.connect(dc, media, test).await {
+    let route = match upstream.connect(dc, media, test, &relay).await {
         Ok(route) => route,
         Err(error) => {
             if config.verbose {
@@ -208,6 +210,21 @@ async fn serve(
         }
     };
     match route {
+        Route::H2(channel) => {
+            if config.verbose {
+                eprintln!(
+                    "tgws: client={peer} route=h2 host={} channel={}",
+                    channel.host(),
+                    channel.id()
+                );
+            }
+            let result =
+                cf_h2::bridge_h2(&mut client, channel, context, parsed.protocol, stats, idle).await;
+            if config.verbose {
+                eprintln!("tgws: client={peer} h2 closed: {}", format_result(&result));
+            }
+            result
+        }
         Route::WebSocket(ws, packetized) => {
             if config.verbose {
                 eprintln!("tgws: client={peer} route=websocket packetized={packetized}");
@@ -238,9 +255,6 @@ async fn serve(
             if config.verbose {
                 eprintln!("tgws: client={peer} route=tcp");
             }
-            timeout(idle, remote.write_all(&relay))
-                .await
-                .map_err(websocket::timed_out)??;
             let result = bridge_tcp(
                 &mut client,
                 &mut remote,

@@ -1,5 +1,6 @@
 //! Telegram routes, bounded warm sockets, and validated fallback-domain refresh.
 use crate::{
+    cf_h2::{CfH2Pool, H2Channel},
     config::Config,
     stats::Stats,
     websocket::{self, WebSocket},
@@ -14,24 +15,27 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
+    sync::Notify,
     time::{sleep, timeout},
 };
 use tokio_native_tls::TlsConnector;
 
 const DC_IDS: [i16; 6] = [1, 2, 3, 4, 5, 203];
-const POOL_MAX_AGE: Duration = Duration::from_secs(100);
+const DIRECT_POOL_MAX_AGE: Duration = Duration::from_secs(120);
+const WORKER_POOL_MAX_AGE: Duration = Duration::from_secs(100);
 const DOMAIN_LIMIT: usize = 64 * 1024;
 const ENCODED_DOMAINS: &str = "virkgj.com\nvmmzovy.com\nmkuosckvso.com\nzaewayzmplad.com\ntwdmbzcm.com\nawzwsldi.com\nclngqrflngqin.com\ntjacxbqtj.com\nbxaxtxmrw.com\ndmohrsgmohcrwb.com\nvwbmtmoi.com\nkhgrre.com\nulihssf.com\ntmhqsdqmfpmk.com\nxwuwoqbm.com\norgcnunpj.com\nzhkuldz.com\nzypoljnslxa.com\nefabnxaowuzs.com\nzaftuzsftqdq.com";
 
 // This short-lived return value avoids adding a heap allocation to every upgrade.
 #[allow(clippy::large_enum_variant)]
 pub enum Route {
+    H2(H2Channel),
     WebSocket(WebSocket, bool),
     Tcp(TcpStream),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum PoolKey {
-    Direct(i16, bool),
+    Direct(i16, bool, bool),
     Worker(i16),
 }
 struct Idle {
@@ -43,6 +47,7 @@ struct Bucket {
     idle: Vec<Idle>,
     failures: u32,
     retry: Option<Instant>,
+    refill_requested: bool,
 }
 #[derive(Default)]
 struct State {
@@ -52,6 +57,54 @@ struct State {
     blacklisted: BTreeSet<(i16, bool, bool)>,
     failed_dc: BTreeMap<(i16, bool, bool), Instant>,
     failed_ip: BTreeMap<String, Instant>,
+    tcp_failures: BTreeMap<(String, u16), u32>,
+    tcp_retry_after: BTreeMap<(String, u16), Instant>,
+    tcp_connecting: BTreeSet<(String, u16)>,
+    h2_retry_after: BTreeMap<i16, Instant>,
+}
+
+/// Releases the per-destination TCP dial slot if its future is cancelled.
+struct TcpAttempt<'a> {
+    state: &'a Mutex<State>,
+    key: (String, u16),
+}
+
+impl<'a> TcpAttempt<'a> {
+    fn begin(state: &'a Mutex<State>, key: (String, u16), now: Instant) -> Option<Self> {
+        let mut shared = state.lock().unwrap();
+        if shared.tcp_connecting.contains(&key)
+            || shared
+                .tcp_retry_after
+                .get(&key)
+                .is_some_and(|retry| *retry > now)
+        {
+            return None;
+        }
+        shared.tcp_connecting.insert(key.clone());
+        drop(shared);
+        Some(Self { state, key })
+    }
+
+    fn success(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.tcp_failures.remove(&self.key);
+        state.tcp_retry_after.remove(&self.key);
+    }
+
+    fn failure(&self, now: Instant) -> Duration {
+        let mut state = self.state.lock().unwrap();
+        let failures = state.tcp_failures.entry(self.key.clone()).or_default();
+        *failures = failures.saturating_add(1);
+        let delay = tcp_fallback_backoff(*failures);
+        state.tcp_retry_after.insert(self.key.clone(), now + delay);
+        delay
+    }
+}
+
+impl Drop for TcpAttempt<'_> {
+    fn drop(&mut self) {
+        self.state.lock().unwrap().tcp_connecting.remove(&self.key);
+    }
 }
 
 pub struct Upstream {
@@ -59,6 +112,8 @@ pub struct Upstream {
     stats: Arc<Stats>,
     verified: TlsConnector,
     direct: TlsConnector,
+    h2: Option<Arc<CfH2Pool>>,
+    pool_wakeup: Notify,
     state: Mutex<State>,
 }
 
@@ -74,6 +129,19 @@ impl Upstream {
             .danger_accept_invalid_hostnames(true)
             .build()
             .map_err(io::Error::other)?;
+        let h2 = if config.h2_enabled() {
+            let mut builder = native_tls::TlsConnector::builder();
+            builder.request_alpns(&["h2"]);
+            let connector = builder.build().map_err(io::Error::other)?;
+            Some(CfH2Pool::new(
+                connector.into(),
+                Duration::from_secs(config.connect_timeout_secs),
+                config.buffer_size,
+                stats.clone(),
+            ))
+        } else {
+            None
+        };
         let domains = if config.cfproxy_user_domains.is_empty() {
             parse_domain_pool(ENCODED_DOMAINS)
         } else {
@@ -83,17 +151,25 @@ impl Upstream {
             domains,
             ..State::default()
         };
-        if config.pool_size > 0 && !config.force_test_dc {
+        if config.pool_size > 0 {
             for dc in config.dc_redirects.keys() {
                 for media in [false, true] {
-                    state
-                        .pools
-                        .insert(PoolKey::Direct(*dc, media), Bucket::default());
+                    state.pools.insert(
+                        PoolKey::Direct(*dc, media, config.force_test_dc),
+                        Bucket::default(),
+                    );
                 }
             }
-            if !config.cfproxy_worker_domains.is_empty() {
+            // Test DC sessions deliberately bypass the Worker pool, so do not
+            // keep six unused production Worker sockets warm in forced-test mode.
+            if !config.force_test_dc && !config.cfproxy_worker_domains.is_empty() {
                 for dc in DC_IDS {
-                    state.pools.insert(PoolKey::Worker(dc), Bucket::default());
+                    // Match upstream warmup: a Worker socket is useful only for
+                    // DCs without a configured direct target.  Other DCs still
+                    // open a Worker on demand after a direct-pool miss.
+                    if !config.dc_redirects.contains_key(&dc) {
+                        state.pools.insert(PoolKey::Worker(dc), Bucket::default());
+                    }
                 }
             }
         }
@@ -102,6 +178,8 @@ impl Upstream {
             stats,
             verified: verified.into(),
             direct: direct.into(),
+            h2,
+            pool_wakeup: Notify::new(),
             state: Mutex::new(state),
         }))
     }
@@ -110,6 +188,12 @@ impl Upstream {
     }
     fn connect_limit(&self) -> Duration {
         Duration::from_secs(self.config.connect_timeout_secs)
+    }
+
+    pub async fn close(&self) {
+        if let Some(h2) = &self.h2 {
+            h2.close().await;
+        }
     }
     #[allow(clippy::too_many_arguments)]
     async fn ws(
@@ -136,16 +220,30 @@ impl Upstream {
         .await
     }
 
-    pub async fn connect(&self, dc: i16, media: bool, test: bool) -> io::Result<Route> {
+    pub async fn connect(
+        &self,
+        dc: i16,
+        media: bool,
+        test: bool,
+        relay_init: &[u8],
+    ) -> io::Result<Route> {
         // A client may not occupy its admission slot forever while every fallback is down.
         timeout(
-            Duration::from_secs(50) + self.connect_limit(),
-            self.connect_inner(dc, media, test),
+            // Direct, Worker, H2 and CF WebSocket each have their own bounded
+            // setup phase.  Leave the final TCP fallback its complete timeout.
+            Duration::from_secs(60) + self.connect_limit(),
+            self.connect_inner(dc, media, test, relay_init),
         )
         .await
         .map_err(websocket::timed_out)?
     }
-    async fn connect_inner(&self, dc: i16, media: bool, test: bool) -> io::Result<Route> {
+    async fn connect_inner(
+        &self,
+        dc: i16,
+        media: bool,
+        test: bool,
+        relay_init: &[u8],
+    ) -> io::Result<Route> {
         if let Ok(Some(socket)) =
             timeout(Duration::from_secs(15), self.direct_route(dc, media, test)).await
         {
@@ -183,6 +281,29 @@ impl Upstream {
             }
         }
         if self.config.cfproxy && !test {
+            if media && self.h2.is_some() {
+                match timeout(Duration::from_secs(8), self.h2_route(dc)).await {
+                    Ok(Some(channel)) => {
+                        self.stats.cf();
+                        self.stats.h2();
+                        return Ok(Route::H2(channel));
+                    }
+                    Ok(None) => {
+                        if self.config.verbose {
+                            eprintln!("tgws: dc={dc} media H2 unavailable; trying CF WebSocket");
+                        }
+                    }
+                    Err(_) => {
+                        self.stats.h2_error();
+                        self.h2_cool_down(dc);
+                        if self.config.verbose {
+                            eprintln!(
+                                "tgws: dc={dc} media H2 setup timed out; trying CF WebSocket"
+                            );
+                        }
+                    }
+                }
+            }
             match timeout(Duration::from_secs(15), self.cf_route(dc)).await {
                 Ok(Some(socket)) => {
                     self.stats.cf();
@@ -197,15 +318,94 @@ impl Upstream {
                 _ => {}
             }
         }
-        let remote = timeout(self.connect_limit(), TcpStream::connect((target, 443)))
-            .await
-            .map_err(websocket::timed_out)??;
-        remote.set_nodelay(true)?;
-        let socket = socket2::SockRef::from(&remote);
-        let _ = socket.set_recv_buffer_size(self.config.buffer_size);
-        let _ = socket.set_send_buffer_size(self.config.buffer_size);
+        let remote = self.tcp_fallback(target, 443, relay_init).await?;
         self.stats.tcp();
         Ok(Route::Tcp(remote))
+    }
+
+    fn h2_cool_down(&self, dc: i16) {
+        self.state
+            .lock()
+            .unwrap()
+            .h2_retry_after
+            .insert(dc, Instant::now() + Duration::from_secs(30));
+    }
+
+    async fn h2_route(&self, dc: i16) -> Option<H2Channel> {
+        let pool = self.h2.as_ref()?;
+        {
+            let mut state = self.state.lock().unwrap();
+            if state
+                .h2_retry_after
+                .get(&dc)
+                .is_some_and(|until| *until > Instant::now())
+            {
+                return None;
+            }
+            state.h2_retry_after.remove(&dc);
+        }
+        for base in self.domains_for(dc) {
+            let host = format!("kws{dc}.{base}");
+            match pool.open(&host).await {
+                Ok(Some(channel)) => {
+                    self.state.lock().unwrap().preferred.insert(dc, base);
+                    return Some(channel);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if self.config.verbose {
+                        eprintln!("tgws: dc={dc} H2 domain={host} failed: {error}");
+                    }
+                }
+            }
+        }
+        self.h2_cool_down(dc);
+        None
+    }
+
+    async fn tcp_fallback(
+        &self,
+        target: &str,
+        port: u16,
+        relay_init: &[u8],
+    ) -> io::Result<TcpStream> {
+        let key = (target.to_owned(), port);
+        let Some(attempt) = TcpAttempt::begin(&self.state, key, Instant::now()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "TCP fallback is connecting or backing off",
+            ));
+        };
+        let result = timeout(self.connect_limit(), async {
+            let mut remote = TcpStream::connect((target, port)).await?;
+            remote.set_nodelay(true)?;
+            let socket = socket2::SockRef::from(&remote);
+            let _ = socket.set_recv_buffer_size(self.config.buffer_size);
+            let _ = socket.set_send_buffer_size(self.config.buffer_size);
+            // Treat delivery of the MTProto relay header as part of setup. A peer
+            // that accepts TCP and immediately resets must enter the same backoff.
+            remote.write_all(relay_init).await?;
+            Ok(remote)
+        })
+        .await
+        .map_err(websocket::timed_out)
+        .and_then(|result| result);
+        match result {
+            Ok(remote) => {
+                attempt.success();
+                Ok(remote)
+            }
+            Err(error) => {
+                let delay = attempt.failure(Instant::now());
+                if self.config.verbose {
+                    eprintln!(
+                        "tgws: TCP fallback {target}:{port} failed: {error}; retry in {}s",
+                        delay.as_secs()
+                    );
+                }
+                Err(error)
+            }
+        }
     }
     async fn cf_route(&self, dc: i16) -> Option<WebSocket> {
         for base in self.domains_for(dc) {
@@ -240,14 +440,25 @@ impl Upstream {
     async fn direct_route(&self, dc: i16, media: bool, test: bool) -> Option<WebSocket> {
         let ip = self.config.dc_redirects.get(&dc)?;
         let key = (dc, media, test);
-        if self.state.lock().unwrap().blacklisted.contains(&key) {
-            return None;
-        }
-        if !test {
-            if let Some(socket) = self.take_pool(PoolKey::Direct(dc, media)).await {
+        if self.config.pool_size > 0 {
+            let pool_key = PoolKey::Direct(dc, media, test);
+            self.state
+                .lock()
+                .unwrap()
+                .pools
+                .entry(pool_key)
+                .or_default();
+            if let Some(socket) = self.take_pool(pool_key).await {
                 self.direct_success(key, ip);
                 return Some(socket);
             }
+            // Upstream v1.11 uses prepared direct sockets only. Keeping the old
+            // on-demand path when pooling is disabled preserves low-RAM router
+            // configs whose pool_size has historically defaulted to zero.
+            return None;
+        }
+        if self.state.lock().unwrap().blacklisted.contains(&key) {
+            return None;
         }
         let has_cf =
             (!test && self.config.cfproxy) || !self.config.cfproxy_worker_domains.is_empty();
@@ -267,7 +478,7 @@ impl Upstream {
         let limit = self
             .connect_limit()
             .min(Duration::from_secs(if dc_cooldown { 2 } else { 5 }));
-        let path = if test { "/apiws_test" } else { "/apiws" };
+        let path = ws_path(test);
         let mut all_redirects = true;
         for domain in ws_domains(dc, media) {
             match self.ws(ip, &domain, &domain, path, true, true, limit).await {
@@ -319,10 +530,6 @@ impl Upstream {
         let mut s = self.state.lock().unwrap();
         s.failed_dc.remove(&key);
         s.failed_ip.remove(ip);
-        if let Some(b) = s.pools.get_mut(&PoolKey::Direct(key.0, key.1)) {
-            b.failures = 0;
-            b.retry = None;
-        }
     }
     async fn worker(&self, dc: i16, ip: &str) -> io::Result<WebSocket> {
         let mut domains = self.config.cfproxy_worker_domains.clone();
@@ -382,39 +589,81 @@ impl Upstream {
                 .and_then(|b| b.idle.pop());
             let Some(mut item) = candidate else {
                 self.stats.pool_miss();
+                self.request_refill(key);
                 return None;
             };
-            if item.created.elapsed() < POOL_MAX_AGE && item.socket.idle_healthy().await {
+            if item.created.elapsed() < pool_max_age(key) && item.socket.idle_healthy().await {
                 self.stats.pool_hit();
+                self.request_refill(key);
                 return Some(item.socket);
             }
+        }
+    }
+
+    fn request_refill(&self, key: PoolKey) {
+        let notify = {
+            let mut state = self.state.lock().unwrap();
+            state.pools.get_mut(&key).is_some_and(|bucket| {
+                if bucket.refill_requested {
+                    false
+                } else {
+                    bucket.refill_requested = true;
+                    true
+                }
+            })
+        };
+        if notify {
+            self.pool_wakeup.notify_one();
         }
     }
 
     /// One background dial at a time intentionally limits TLS handshake RAM on routers.
     /// Own this future under the proxy's JoinSet so restart cancels in-flight dials too.
     pub async fn maintain(&self) {
-        if self.config.pool_size == 0 || self.config.force_test_dc {
+        if self.config.pool_size == 0 {
             return;
         }
         loop {
+            let mut attempted = false;
+            let mut next_retry: Option<Instant> = None;
             let keys: Vec<_> = self.state.lock().unwrap().pools.keys().copied().collect();
             for key in keys {
                 let needed = {
                     let mut state = self.state.lock().unwrap();
                     let bucket = state.pools.get_mut(&key).unwrap();
-                    bucket.idle.retain(|s| s.created.elapsed() < POOL_MAX_AGE);
+                    bucket
+                        .idle
+                        .retain(|socket| socket.created.elapsed() < pool_max_age(key));
                     let cap = match key {
                         PoolKey::Direct(..) => self.config.pool_size,
                         PoolKey::Worker(..) => 1,
                     };
-                    bucket.idle.len() < cap && bucket.retry.is_none_or(|t| t <= Instant::now())
+                    let capacity_missing = bucket.idle.len() < cap;
+                    // A refill notification may arrive while the previous
+                    // dial is still running.  Once that dial fills the bucket,
+                    // consume the stale flag so the next checkout can wake us.
+                    if !capacity_missing {
+                        bucket.refill_requested = false;
+                    }
+                    let needed =
+                        capacity_missing && bucket.retry.is_none_or(|t| t <= Instant::now());
+                    if capacity_missing {
+                        if let Some(retry) = bucket.retry.filter(|retry| *retry > Instant::now()) {
+                            next_retry =
+                                Some(next_retry.map_or(retry, |current| current.min(retry)));
+                        }
+                    }
+                    if needed {
+                        bucket.refill_requested = false;
+                    }
+                    needed
                 };
                 if !needed {
                     continue;
                 }
+                attempted = true;
                 let result = match key {
-                    PoolKey::Direct(dc, media) => self.pool_direct(dc, media).await,
+                    PoolKey::Direct(dc, media, test) => self.pool_direct(dc, media, test).await,
                     PoolKey::Worker(dc) => self.worker(dc, fallback_ip(dc, false).unwrap()).await,
                 };
                 let mut state = self.state.lock().unwrap();
@@ -434,49 +683,58 @@ impl Upstream {
                     }
                 }
             }
-            sleep(Duration::from_secs(5)).await;
+            // Fill every missing slot immediately, but keep the actual TLS
+            // handshakes sequential to cap CPU/RAM spikes on small routers.
+            if attempted {
+                continue;
+            }
+            let delay = next_retry
+                .map(|retry| retry.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::from_secs(5))
+                .min(Duration::from_secs(5));
+            tokio::select! {
+                _ = sleep(delay) => {}
+                _ = self.pool_wakeup.notified() => {}
+            }
         }
     }
-    async fn pool_direct(&self, dc: i16, media: bool) -> io::Result<WebSocket> {
+    async fn pool_direct(&self, dc: i16, media: bool, test: bool) -> io::Result<WebSocket> {
         let ip = &self.config.dc_redirects[&dc];
+        let path = ws_path(test);
         let mut last = io::Error::new(io::ErrorKind::NotConnected, "no direct WebSocket route");
         for domain in ws_domains(dc, media) {
             match self
-                .ws(
-                    ip,
-                    &domain,
-                    &domain,
-                    "/apiws",
-                    true,
-                    true,
-                    self.connect_limit(),
-                )
+                .ws(ip, &domain, &domain, path, true, true, self.connect_limit())
                 .await
             {
                 Ok(socket) => return Ok(socket),
                 Err(error) => {
-                    if websocket::is_redirect(&error) {
-                        last = error;
-                        continue;
-                    }
-                    if self.config.sni_fronting && should_front(&error) {
-                        let result = self
+                    self.stats.ws_error();
+                    let try_fronting = self.config.sni_fronting && should_front(&error);
+                    last = error;
+                    if try_fronting {
+                        match self
                             .ws(
                                 ip,
                                 &domain,
                                 "sprinthost.ru",
-                                "/apiws",
+                                path,
                                 true,
                                 true,
                                 self.connect_limit(),
                             )
-                            .await;
-                        if result.is_ok() {
-                            self.stats.fronting();
+                            .await
+                        {
+                            Ok(socket) => {
+                                self.stats.fronting();
+                                return Ok(socket);
+                            }
+                            Err(error) => {
+                                self.stats.ws_error();
+                                last = error;
+                            }
                         }
-                        return result;
                     }
-                    return Err(error);
                 }
             }
         }
@@ -519,7 +777,7 @@ impl Upstream {
             let tcp=TcpStream::connect((host,443)).await?;
             let tls=self.verified.connect("raw.githubusercontent.com",tcp).await.map_err(io::Error::other)?;
             let mut wire=BufReader::with_capacity(4096,tls);
-            wire.write_all(b"GET /Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt HTTP/1.1\r\nHost: raw.githubusercontent.com\r\nUser-Agent: tgws-rust/1.10.4\r\nAccept-Encoding: identity\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
+            wire.write_all(b"GET /Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt HTTP/1.1\r\nHost: raw.githubusercontent.com\r\nUser-Agent: tgws-rust/1.11.1\r\nAccept-Encoding: identity\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
             wire.flush().await?;
             let (status,headers)=websocket::read_http_headers(&mut wire).await?;
             if status!=200 { return Err(io::Error::other(websocket::HttpError(status))); }
@@ -545,6 +803,16 @@ fn should_front(e: &io::Error) -> bool {
 pub fn refill_backoff(failures: u32) -> Duration {
     Duration::from_secs((1u64 << failures.saturating_sub(1).min(12)).min(3600))
 }
+fn tcp_fallback_backoff(failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(7);
+    Duration::from_secs((30u64 << exponent).min(3600))
+}
+fn pool_max_age(key: PoolKey) -> Duration {
+    match key {
+        PoolKey::Direct(..) => DIRECT_POOL_MAX_AGE,
+        PoolKey::Worker(..) => WORKER_POOL_MAX_AGE,
+    }
+}
 pub fn fallback_ip(dc: i16, test: bool) -> Option<&'static str> {
     if test {
         return match dc {
@@ -564,14 +832,20 @@ pub fn fallback_ip(dc: i16, test: bool) -> Option<&'static str> {
         _ => None,
     }
 }
-pub fn ws_domains(dc: i16, media: bool) -> [String; 2] {
+pub fn ws_domains(dc: i16, media: bool) -> Vec<String> {
     let dc = if dc == 203 { 2 } else { dc };
     let regular = format!("kws{dc}.web.telegram.org");
-    let media_domain = format!("kws{dc}-1.web.telegram.org");
     if media {
-        [media_domain, regular]
+        vec![format!("kws{dc}-1.web.telegram.org"), regular]
     } else {
-        [regular, media_domain]
+        vec![regular]
+    }
+}
+fn ws_path(test: bool) -> &'static str {
+    if test {
+        "/apiws_test"
+    } else {
+        "/apiws"
     }
 }
 fn worker_path(dc: i16, ip: &str) -> String {
@@ -690,10 +964,13 @@ mod tests {
     fn routing_isolates_test_environment() {
         assert_eq!(fallback_ip(2, true), Some("149.154.167.40"));
         assert_eq!(fallback_ip(4, true), None);
+        assert_eq!(ws_domains(203, false), vec!["kws2.web.telegram.org"]);
         assert_eq!(
             ws_domains(203, true),
-            ["kws2-1.web.telegram.org", "kws2.web.telegram.org"]
+            vec!["kws2-1.web.telegram.org", "kws2.web.telegram.org"]
         );
+        assert_eq!(ws_path(false), "/apiws");
+        assert_eq!(ws_path(true), "/apiws_test");
         assert_eq!(
             worker_path(2, "149.154.167.40"),
             "/apiws?dc=2&dst=149.154.167.40"
@@ -717,6 +994,120 @@ mod tests {
         ] {
             assert_eq!(refill_backoff(n).as_secs(), want);
         }
+        assert_eq!(
+            pool_max_age(PoolKey::Direct(2, false, false)).as_secs(),
+            120
+        );
+        assert_eq!(pool_max_age(PoolKey::Worker(2)).as_secs(), 100);
+    }
+    #[test]
+    fn tcp_fallback_is_single_flight_and_has_upstream_backoff() {
+        let state = Mutex::new(State::default());
+        let key = ("192.0.2.1".to_owned(), 443);
+        let now = Instant::now();
+
+        let first = TcpAttempt::begin(&state, key.clone(), now).unwrap();
+        assert!(TcpAttempt::begin(&state, key.clone(), now).is_none());
+        assert!(TcpAttempt::begin(&state, ("192.0.2.2".into(), 443), now).is_some());
+        drop(first);
+        assert!(state.lock().unwrap().tcp_connecting.is_empty());
+
+        let mut clock = now;
+        for expected in [30, 60, 120, 240, 480, 960, 1920, 3600, 3600] {
+            let attempt = TcpAttempt::begin(&state, key.clone(), clock).unwrap();
+            let delay = attempt.failure(clock);
+            assert_eq!(delay.as_secs(), expected);
+            drop(attempt);
+            assert!(TcpAttempt::begin(&state, key.clone(), clock).is_none());
+            clock += delay;
+        }
+
+        let attempt = TcpAttempt::begin(&state, key.clone(), clock).unwrap();
+        attempt.success();
+        drop(attempt);
+        let shared = state.lock().unwrap();
+        assert!(!shared.tcp_failures.contains_key(&key));
+        assert!(!shared.tcp_retry_after.contains_key(&key));
+        assert!(!shared.tcp_connecting.contains(&key));
+    }
+    #[tokio::test]
+    async fn pool_keys_and_paths_keep_production_and_test_sockets_separate() {
+        let config = Config {
+            pool_size: 1,
+            cfproxy: false,
+            dc_redirects: [(2, "192.0.2.1".to_owned())].into(),
+            ..Config::default()
+        };
+        let upstream = Upstream::new(Arc::new(config), Arc::new(Stats::default())).unwrap();
+
+        assert!(upstream
+            .state
+            .lock()
+            .unwrap()
+            .pools
+            .contains_key(&PoolKey::Direct(2, false, false)));
+        assert!(upstream.direct_route(2, false, true).await.is_none());
+        let state = upstream.state.lock().unwrap();
+        assert!(state.pools.contains_key(&PoolKey::Direct(2, false, false)));
+        assert!(state.pools.contains_key(&PoolKey::Direct(2, false, true)));
+        drop(state);
+
+        let worker = Config {
+            pool_size: 1,
+            dc_redirects: [(2, "192.0.2.1".to_owned())].into(),
+            cfproxy_worker_domains: vec!["worker.example".into()],
+            ..Config::default()
+        };
+        let worker = Upstream::new(Arc::new(worker), Arc::new(Stats::default())).unwrap();
+        let worker = worker.state.lock().unwrap();
+        assert!(worker.pools.contains_key(&PoolKey::Worker(1)));
+        assert!(!worker.pools.contains_key(&PoolKey::Worker(2)));
+        drop(worker);
+
+        let forced = Config {
+            pool_size: 1,
+            force_test_dc: true,
+            dc_redirects: [(2, "192.0.2.1".to_owned())].into(),
+            cfproxy_worker_domains: vec!["worker.example".into()],
+            ..Config::default()
+        };
+        let forced = Upstream::new(Arc::new(forced), Arc::new(Stats::default())).unwrap();
+        let forced = forced.state.lock().unwrap();
+        assert!(forced.pools.contains_key(&PoolKey::Direct(2, false, true)));
+        assert!(!forced.pools.contains_key(&PoolKey::Direct(2, false, false)));
+        assert!(!forced
+            .pools
+            .keys()
+            .any(|key| matches!(key, PoolKey::Worker(_))));
+    }
+    #[tokio::test]
+    async fn tcp_fallback_sends_relay_header_before_releasing_single_flight() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut relay = [0; 6];
+            socket.read_exact(&mut relay).await.unwrap();
+            relay
+        });
+        let config = Config {
+            connect_timeout_secs: 1,
+            ..Config::default()
+        };
+        let upstream = Upstream::new(Arc::new(config), Arc::new(Stats::default())).unwrap();
+        let remote = upstream
+            .tcp_fallback("127.0.0.1", port, b"relay!")
+            .await
+            .unwrap();
+        assert_eq!(peer.await.unwrap(), *b"relay!");
+        drop(remote);
+        let key = ("127.0.0.1".to_owned(), port);
+        let state = upstream.state.lock().unwrap();
+        assert!(!state.tcp_connecting.contains(&key));
+        assert!(!state.tcp_failures.contains_key(&key));
+        assert!(!state.tcp_retry_after.contains_key(&key));
     }
     #[tokio::test]
     async fn bounded_http_body_handles_chunks_and_truncation() {

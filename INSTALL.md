@@ -149,7 +149,7 @@ opkg install wget-ssl ca-bundle
 Для установки конкретной версии:
 
 ```sh
-sh /tmp/tgws-install.sh --version v2.2.0
+sh /tmp/tgws-install.sh --version v2.3.0
 ```
 
 `config.json`, secret, пароль панели и незнакомые прежние поля не

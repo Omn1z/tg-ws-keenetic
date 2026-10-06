@@ -4,7 +4,7 @@ let csrf='',loaded=false,busy=false,timer,refreshing=null;
 const STATS_INTERVAL_MS=2000;
 let updateInfo=null,updateTimer,updateCall=false,updateActive=false,updateDeadline=0,updateTarget='',updateChecked=false,reloading=false;
 const numbers=['port','max_connections','buffer_size','pool_size','connect_timeout_secs','idle_timeout_secs'];
-const booleans=['cfproxy','disable_secure','domain_refresh','sni_fronting','force_test_dc','proxy_protocol'];
+const booleans=['cfproxy','cfproxy_h2_media','disable_secure','domain_refresh','sni_fronting','force_test_dc','proxy_protocol'];
 const strings=['link_host','fake_tls_domain','web_user'];
 const lists=['cfproxy_user_domains','cfproxy_worker_domains'];
 const field=name=>form.elements.namedItem(name);
@@ -53,7 +53,7 @@ async function refreshState(reset=false){
     $('link').textContent=data.link;$('open').href=data.link;$('open').setAttribute('aria-disabled','false');
     $('active').textContent=s.connections_active;$('total').textContent=`Всего ${s.connections_total}`;
     $('up').textContent=bytes(s.bytes_up);$('down').textContent=bytes(s.bytes_down);$('uptime').textContent=elapsed(Math.floor(s.uptime_secs));
-    $('routes').textContent=`WS ${s.connections_ws} · CF ${s.connections_cfproxy} · TCP ${s.connections_tcp_fallback}`;
+    $('routes').textContent=`WS ${s.connections_ws} · CF ${s.connections_cfproxy} · H2 ${s.connections_h2} · TCP ${s.connections_tcp_fallback}`;
     if(!loaded||reset){populate(data.config,data.password_set);loaded=true;}
     if(finishUpdate(data.version))return;if(data.update)renderUpdate(data.update);else updateControls();if(!updateChecked)checkUpdate();
   }catch(error){document.title='↑ — · ↓ — · нет связи';$('status').textContent='Нет связи';$('led').className='off';if(!loaded)notice(error.message,true);}
