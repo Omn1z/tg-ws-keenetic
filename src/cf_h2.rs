@@ -37,7 +37,9 @@ use tokio::{
 use tokio_native_tls::TlsConnector;
 
 pub const MAX_PACKET: usize = 4 * 1024 * 1024;
-const MAX_PADDED_PACKET: usize = MAX_PACKET + 15;
+const MAX_PLAIN_PADDING: usize = 256;
+const MAX_ENCRYPTED_PADDING: usize = 15;
+const MAX_PADDED_PACKET: usize = MAX_PACKET + MAX_PLAIN_PADDING;
 const MAX_CHANNEL_REQUESTS: usize = 8;
 const MAX_CHANNEL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHANNEL_REPLY_BYTES: usize = 8 * 1024 * 1024;
@@ -115,6 +117,29 @@ impl BufferedReply {
     pub fn chunks(&self) -> impl Iterator<Item = &[u8]> {
         self.parts.iter().map(Bytes::as_ref)
     }
+
+    fn replay_id(&self) -> ReplyId {
+        let mut bytes = [0_u8; 24];
+        let mut length = 0;
+        for part in &self.parts {
+            let count = part.len().min(bytes.len() - length);
+            bytes[length..length + count].copy_from_slice(&part[..count]);
+            length += count;
+            if length == bytes.len() {
+                break;
+            }
+        }
+        ReplyId {
+            bytes,
+            length: length as u8,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReplyId {
+    bytes: [u8; 24],
+    length: u8,
 }
 
 impl std::fmt::Debug for BufferedReply {
@@ -306,6 +331,12 @@ struct ConnectionState {
     driver: Option<JoinHandle<()>>,
 }
 
+#[derive(Default)]
+struct ActiveRequestState {
+    counts: HashMap<usize, usize>,
+    invalidate_when_idle: BTreeSet<usize>,
+}
+
 struct Lane {
     host: String,
     connector: TlsConnector,
@@ -325,6 +356,8 @@ struct Lane {
     next_channel: AtomicUsize,
     next_task: AtomicUsize,
     request_tasks: Mutex<HashMap<usize, JoinHandle<()>>>,
+    active_requests: Mutex<ActiveRequestState>,
+    active_changed: Notify,
     _slot: Option<OwnedSemaphorePermit>,
 }
 
@@ -357,6 +390,8 @@ impl Lane {
             next_channel: AtomicUsize::new(1),
             next_task: AtomicUsize::new(1),
             request_tasks: Mutex::new(HashMap::new()),
+            active_requests: Mutex::new(ActiveRequestState::default()),
+            active_changed: Notify::new(),
             _slot: slot,
         })
     }
@@ -455,10 +490,38 @@ impl Lane {
         }
     }
 
+    fn invalidate_connection_if_idle(&self, generation: usize) -> bool {
+        // Serialize the zero-active check with stream admission.  A request
+        // which has already submitted headers therefore protects its shared
+        // connection from an unrelated stream timeout.  Once marked, a
+        // generation accepts no new streams and its last active request owns
+        // the deferred invalidation.
+        let mut active = self.active_requests.lock().unwrap();
+        if active.counts.get(&generation).copied().unwrap_or_default() != 0 {
+            active.invalidate_when_idle.insert(generation);
+            return false;
+        }
+        active.invalidate_when_idle.remove(&generation);
+        self.invalidate_connection(generation);
+        drop(active);
+        self.active_changed.notify_waiters();
+        true
+    }
+
     fn connection_finished(&self, generation: usize) {
-        let mut state = self.connection.lock().unwrap();
-        if state.generation == generation {
-            state.sender = None;
+        let changed = {
+            let mut state = self.connection.lock().unwrap();
+            if state.generation == generation {
+                state.sender = None;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            // Admission waiters for a poisoned old generation can reconnect
+            // immediately when its driver has already terminated.
+            self.active_changed.notify_waiters();
         }
     }
 
@@ -551,13 +614,13 @@ impl Lane {
         Ok((sender, generation))
     }
 
-    async fn ready_sender(self: &Arc<Self>) -> io::Result<SendRequest<Bytes>> {
+    async fn ready_sender(self: &Arc<Self>) -> io::Result<(SendRequest<Bytes>, usize)> {
         // Reconnect once if an idle connection died before a request acquired a
         // stream.  Never retry after request headers or body were submitted.
         for attempt in 0..2 {
             let (sender, generation) = self.connect().await?;
             match sender.ready().await {
-                Ok(sender) => return Ok(sender),
+                Ok(sender) => return Ok((sender, generation)),
                 Err(_) if attempt == 0 => {
                     self.invalidate_connection(generation);
                 }
@@ -571,21 +634,63 @@ impl Lane {
         self: &Arc<Self>,
         method: Method,
         body: Bytes,
-    ) -> io::Result<(ResponseFuture, h2::SendStream<Bytes>)> {
-        let mut sender = self.ready_sender().await?;
-        let uri = format!("https://{}/api", self.host);
-        let mut request = Request::builder()
-            .method(method)
-            .uri(uri)
-            .version(Version::HTTP_2)
-            .header(header::ACCEPT_ENCODING, "identity");
-        if !body.is_empty() {
-            request = request
-                .header(header::CONTENT_TYPE, "application/octet-stream")
-                .header(header::CONTENT_LENGTH, body.len());
+    ) -> io::Result<(
+        ResponseFuture,
+        h2::SendStream<Bytes>,
+        usize,
+        ActiveRequestGuard,
+    )> {
+        loop {
+            let (mut sender, generation) = self.ready_sender().await?;
+            let uri = format!("https://{}/api", self.host);
+            let mut request = Request::builder()
+                .method(method.clone())
+                .uri(uri)
+                .version(Version::HTTP_2)
+                .header(header::ACCEPT_ENCODING, "identity");
+            if !body.is_empty() {
+                request = request
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(header::CONTENT_LENGTH, body.len());
+            }
+            let request = request.body(()).map_err(other)?;
+            let changed = self.active_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let wait_for_retirement = {
+                let mut active = self.active_requests.lock().unwrap();
+                let poisoned = active.invalidate_when_idle.contains(&generation);
+                let current = if poisoned {
+                    false
+                } else {
+                    let connection = self.connection.lock().unwrap();
+                    connection.generation == generation && connection.sender.is_some()
+                };
+                if current {
+                    let (response, stream) = sender
+                        .send_request(request, body.is_empty())
+                        .map_err(other)?;
+                    *active.counts.entry(generation).or_default() += 1;
+                    return Ok((
+                        response,
+                        stream,
+                        generation,
+                        ActiveRequestGuard {
+                            lane: Arc::downgrade(self),
+                            generation,
+                        },
+                    ));
+                }
+                poisoned
+            };
+            // The timeout which poisoned this generation may race with a
+            // sender clone acquired above.  Do not let that clone prolong the
+            // retiring connection; wait until the last admitted stream
+            // invalidates it, then acquire a fresh sender.
+            if wait_for_retirement {
+                changed.await;
+            }
         }
-        let request = request.body(()).map_err(other)?;
-        sender.send_request(request, body.is_empty()).map_err(other)
     }
 
     async fn send_body(mut stream: h2::SendStream<Bytes>, mut body: Bytes) -> io::Result<()> {
@@ -606,7 +711,8 @@ impl Lane {
     }
 
     async fn preflight(self: &Arc<Self>) -> io::Result<()> {
-        let (response, _stream) = self.start_request(Method::HEAD, Bytes::new()).await?;
+        let (response, _stream, _generation, _active) =
+            self.start_request(Method::HEAD, Bytes::new()).await?;
         let response = response.await.map_err(other)?;
         match response.status() {
             status if status.is_success() => Ok(()),
@@ -618,21 +724,24 @@ impl Lane {
         }
     }
 
-    async fn post<F, G>(
+    async fn post<S, F, G>(
         self: &Arc<Self>,
         body: Bytes,
+        started: S,
         sent: F,
         headers_received: G,
     ) -> Result<Option<BufferedReply>, PostError>
     where
+        S: FnOnce(usize),
         F: FnOnce(),
         G: FnOnce(),
     {
         self.stats.h2_request();
-        let (response, stream) = self
+        let (response, stream, generation, _active) = self
             .start_request(Method::POST, body.clone())
             .await
             .map_err(PostError::route)?;
+        started(generation);
         Self::send_body(stream, body)
             .await
             .map_err(PostError::route)?;
@@ -914,6 +1023,35 @@ impl Lane {
     }
 }
 
+struct ActiveRequestGuard {
+    lane: Weak<Lane>,
+    generation: usize,
+}
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        let Some(lane) = self.lane.upgrade() else {
+            return;
+        };
+        let mut active = lane.active_requests.lock().unwrap();
+        let Some(count) = active.counts.get_mut(&self.generation) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            active.counts.remove(&self.generation);
+            if active.invalidate_when_idle.remove(&self.generation) {
+                // Keep the admission lock through invalidation.  start_request
+                // can therefore never submit headers through a sender clone
+                // between the zero-count transition and driver cancellation.
+                lane.invalidate_connection(self.generation);
+                drop(active);
+                lane.active_changed.notify_waiters();
+            }
+        }
+    }
+}
+
 impl Drop for Lane {
     fn drop(&mut self) {
         let state = self.connection.get_mut().unwrap();
@@ -1012,6 +1150,7 @@ struct ReplayEntry {
     pending: Option<usize>,
     originals: BTreeSet<usize>,
     retired: bool,
+    reply_id: Option<ReplyId>,
     _history_permit: BudgetPermit,
 }
 
@@ -1021,6 +1160,7 @@ struct Pending {
     entry: Option<usize>,
     sent_at: Option<Instant>,
     receiving: bool,
+    generation: Option<usize>,
 }
 
 enum Terminal {
@@ -1138,6 +1278,7 @@ impl ChannelInner {
                     pending: None,
                     originals: BTreeSet::from([request]),
                     retired: false,
+                    reply_id: None,
                     _history_permit: history_permit,
                 });
                 sequence
@@ -1294,11 +1435,17 @@ impl ChannelInner {
                 return;
             }
             let sent_channel = weak.clone();
+            let started_channel = weak.clone();
             let headers_channel = weak.clone();
             let result = timeout(
                 REQUEST_TIMEOUT,
                 task_lane.post(
                     task_body,
+                    move |generation| {
+                        if let Some(channel) = started_channel.upgrade() {
+                            channel.mark_started(request, generation);
+                        }
+                    },
                     move || {
                         if let Some(channel) = sent_channel.upgrade() {
                             channel.mark_sent(request);
@@ -1316,7 +1463,7 @@ impl ChannelInner {
                 return;
             };
             match result {
-                Ok(Ok(Some(reply))) => channel.deliver(reply),
+                Ok(Ok(Some(reply))) => channel.deliver(request, reply),
                 Ok(Ok(None)) => channel.progress(),
                 Ok(Err(PostError::Transport(code))) => {
                     channel.lane.stats.h2_error();
@@ -1333,7 +1480,12 @@ impl ChannelInner {
                 }
                 Err(_) => {
                     channel.lane.stats.h2_error();
-                    channel.lane.cool_down();
+                    match channel.request_generation(request) {
+                        Some(generation) => {
+                            channel.lane.invalidate_connection_if_idle(generation);
+                        }
+                        None => channel.lane.cool_down(),
+                    }
                     channel.fail(Terminal::Error(
                         io::ErrorKind::TimedOut,
                         "H2 request timed out".into(),
@@ -1367,6 +1519,7 @@ impl ChannelInner {
                 entry,
                 sent_at: None,
                 receiving: false,
+                generation: None,
             },
         );
         drop(state);
@@ -1382,6 +1535,21 @@ impl ChannelInner {
         }
     }
 
+    fn mark_started(&self, request: usize, generation: usize) {
+        if let Some(pending) = self.state.lock().unwrap().pending.get_mut(&request) {
+            pending.generation = Some(generation);
+        }
+    }
+
+    fn request_generation(&self, request: usize) -> Option<usize> {
+        self.state
+            .lock()
+            .unwrap()
+            .pending
+            .get(&request)
+            .and_then(|pending| pending.generation)
+    }
+
     fn mark_receiving(&self, request: usize) {
         let mut state = self.state.lock().unwrap();
         if let Some(pending) = state.pending.get_mut(&request) {
@@ -1395,12 +1563,29 @@ impl ChannelInner {
         self.progress_changed.notify_waiters();
     }
 
-    fn deliver(&self, mut reply: BufferedReply) {
+    fn deliver(&self, request: usize, mut reply: BufferedReply) {
         debug_assert!(!reply.is_empty());
         let length = reply.len();
         let mut state = self.state.lock().unwrap();
         if self.closed.load(Ordering::Acquire) || state.terminal.is_some() {
             return;
+        }
+        if let Some(sequence) = state
+            .pending
+            .get(&request)
+            .and_then(|pending| pending.entry)
+        {
+            let reply_id = reply.replay_id();
+            if let Some(entry) = state
+                .history
+                .iter_mut()
+                .find(|entry| entry.sequence == sequence)
+            {
+                if entry.reply_id != Some(reply_id) {
+                    entry.reply_id = Some(reply_id);
+                    entry.attempts = 0;
+                }
+            }
         }
         state.last_progress = Some(Instant::now());
         if state
@@ -1968,20 +2153,26 @@ fn strip_padded_body(mut body: Vec<u8>) -> io::Result<Vec<u8>> {
             "padded MTProto packet is too short",
         ));
     }
-    let packet_length = if body[..8] == [0; 8] {
+    let (packet_length, max_padding) = if body[..8] == [0; 8] {
         if body.len() < 20 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "plaintext MTProto packet is too short",
             ));
         }
-        20usize
-            .checked_add(u32::from_le_bytes(body[16..20].try_into().unwrap()) as usize)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid MTProto length"))?
+        (
+            20usize
+                .checked_add(u32::from_le_bytes(body[16..20].try_into().unwrap()) as usize)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid MTProto length")
+                })?,
+            MAX_PLAIN_PADDING,
+        )
     } else {
-        24 + ((body.len() - 24) / 16) * 16
+        (24 + ((body.len() - 24) / 16) * 16, MAX_ENCRYPTED_PADDING)
     };
-    if packet_length < 24 || packet_length > body.len() || body.len() - packet_length > 15 {
+    if packet_length < 24 || packet_length > body.len() || body.len() - packet_length > max_padding
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid padded MTProto packet",
@@ -2506,7 +2697,7 @@ mod tests {
     }
 
     #[test]
-    fn padded_packets_strip_zero_through_fifteen_bytes() {
+    fn padded_packets_use_extended_padding_only_for_plaintext() {
         let plaintext = [
             vec![0; 8],
             vec![b'm'; 8],
@@ -2515,14 +2706,38 @@ mod tests {
         ]
         .concat();
         let ciphertext = [vec![b'k'; 8], vec![b'm'; 16], vec![b'c'; 32]].concat();
-        for padding in 0..16 {
+        for padding in 0..=MAX_PLAIN_PADDING {
             let mut wire = plaintext.clone();
             wire.resize(wire.len() + padding, b'z');
             assert_eq!(strip_padded_body(wire).unwrap(), plaintext);
+        }
+        let mut excessive_plaintext = plaintext.clone();
+        excessive_plaintext.resize(plaintext.len() + MAX_PLAIN_PADDING + 1, b'z');
+        assert!(strip_padded_body(excessive_plaintext).is_err());
+
+        let included_length = 272_usize;
+        let included_plaintext = [
+            vec![0; 8],
+            vec![b'm'; 8],
+            (included_length as u32).to_le_bytes().to_vec(),
+            vec![b'd'; included_length],
+        ]
+        .concat();
+        let mut wire = included_plaintext.clone();
+        wire.resize(wire.len() + MAX_ENCRYPTED_PADDING, b'z');
+        assert_eq!(strip_padded_body(wire).unwrap(), included_plaintext);
+
+        for padding in 0..=MAX_ENCRYPTED_PADDING {
             let mut wire = ciphertext.clone();
             wire.resize(wire.len() + padding, b'z');
             assert_eq!(strip_padded_body(wire).unwrap(), ciphertext);
         }
+        let mut next_ciphertext_block = ciphertext.clone();
+        next_ciphertext_block.resize(ciphertext.len() + MAX_ENCRYPTED_PADDING + 1, b'z');
+        assert_eq!(
+            strip_padded_body(next_ciphertext_block.clone()).unwrap(),
+            next_ciphertext_block
+        );
     }
 
     #[tokio::test]
@@ -2858,12 +3073,15 @@ mod tests {
         };
         for channel in [&first, &second] {
             let charge = lane.charge_reply(MAX_GLOBAL_REPLY_BYTES / 2).unwrap();
-            channel.inner.deliver(BufferedReply {
-                parts: vec![Bytes::from_static(b"body")],
-                length: 4,
-                _lane_charge: charge,
-                _channel_charge: None,
-            });
+            channel.inner.deliver(
+                usize::MAX,
+                BufferedReply {
+                    parts: vec![Bytes::from_static(b"body")],
+                    length: 4,
+                    _lane_charge: charge,
+                    _channel_charge: None,
+                },
+            );
         }
         let received = first.receive().await.unwrap();
         assert!(lane.charge_reply(1).is_err());
@@ -3232,6 +3450,180 @@ mod tests {
         assert!(channel.inner.state.lock().unwrap().history.len() <= REPLAY_HISTORY_PACKETS);
         channel.close();
         recovery.abort();
+        lane.close();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn replay_budget_resets_only_for_a_new_reply_prefix() {
+        const REPLY_A: &[u8] = &[b'a'; 40];
+        const REPLY_B: &[u8] = &[b'b'; 40];
+
+        let (lane, mut requests, server) = test_lane().await;
+        let channel = H2Channel {
+            inner: ChannelInner::new(lane.clone()),
+        };
+        let body = Bytes::from_static(b"replykeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+        send(&channel, body.clone()).await;
+        respond(requests.recv().await.unwrap(), 200, REPLY_A);
+        drop(channel.receive().await.unwrap());
+        timeout(Duration::from_secs(1), async {
+            while !channel.inner.state.lock().unwrap().pending.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let sequence = channel.inner.state.lock().unwrap().history[0].sequence;
+        assert!(channel.inner.try_replay(sequence, body.clone()));
+        respond(requests.recv().await.unwrap(), 200, REPLY_A);
+        drop(channel.receive().await.unwrap());
+        timeout(Duration::from_secs(1), async {
+            while !channel.inner.state.lock().unwrap().pending.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(channel.inner.state.lock().unwrap().history[0].attempts, 1);
+
+        assert!(channel.inner.try_replay(sequence, body));
+        respond(requests.recv().await.unwrap(), 200, REPLY_B);
+        drop(channel.receive().await.unwrap());
+        timeout(Duration::from_secs(1), async {
+            while !channel.inner.state.lock().unwrap().pending.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let state = channel.inner.state.lock().unwrap();
+        assert_eq!(state.history[0].attempts, 0);
+        assert_eq!(
+            state.history[0].reply_id,
+            Some(ReplyId {
+                bytes: [b'b'; 24],
+                length: 24,
+            })
+        );
+        drop(state);
+
+        channel.close();
+        lane.close();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn request_timeout_invalidates_only_an_idle_connection_generation() {
+        let (lane, _requests, server) = test_lane().await;
+        let (first_response, first_stream, generation, first_active) = lane
+            .start_request(Method::HEAD, Bytes::new())
+            .await
+            .unwrap();
+        let (second_response, second_stream, second_generation, second_active) = lane
+            .start_request(Method::HEAD, Bytes::new())
+            .await
+            .unwrap();
+        assert_eq!(generation, second_generation);
+        assert_eq!(
+            lane.active_requests.lock().unwrap().counts.get(&generation),
+            Some(&2)
+        );
+
+        drop((first_response, first_stream, first_active));
+        assert!(!lane.invalidate_connection_if_idle(generation));
+        assert!(lane.connection.lock().unwrap().sender.is_some());
+        assert!(lane
+            .active_requests
+            .lock()
+            .unwrap()
+            .invalidate_when_idle
+            .contains(&generation));
+
+        drop((second_response, second_stream, second_active));
+        assert!(lane.connection.lock().unwrap().sender.is_none());
+        let active = lane.active_requests.lock().unwrap();
+        assert!(!active.counts.contains_key(&generation));
+        assert!(!active.invalidate_when_idle.contains(&generation));
+        drop(active);
+
+        lane.close();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn timed_out_channel_aborts_siblings_then_invalidates_the_generation() {
+        let (lane, mut requests, server) = test_lane().await;
+        let channel = H2Channel {
+            inner: ChannelInner::new(lane.clone()),
+        };
+        for body in [
+            Bytes::from_static(b"timeout1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            Bytes::from_static(b"timeout2yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"),
+        ] {
+            send(&channel, body).await;
+        }
+        let _first_wire_request = requests.recv().await.unwrap();
+        let _second_wire_request = requests.recv().await.unwrap();
+
+        let (generation, timed_out, sibling) = {
+            let state = channel.inner.state.lock().unwrap();
+            let mut pending = state.pending.iter();
+            let (&timed_out, first) = pending.next().unwrap();
+            let (&sibling, second) = pending.next().unwrap();
+            assert_eq!(first.generation, second.generation);
+            (first.generation.unwrap(), timed_out, sibling)
+        };
+        assert_eq!(
+            lane.active_requests.lock().unwrap().counts.get(&generation),
+            Some(&2)
+        );
+
+        // timeout(...) first drops the timed-out post future (and therefore
+        // its ActiveRequestGuard), then records deferred invalidation, and
+        // finally fail() aborts every sibling request owned by the channel.
+        channel.inner.retire_and_abort(timed_out);
+        timeout(Duration::from_secs(1), async {
+            while channel
+                .inner
+                .state
+                .lock()
+                .unwrap()
+                .pending
+                .contains_key(&timed_out)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!lane.invalidate_connection_if_idle(generation));
+        assert!(channel
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .contains_key(&sibling));
+        channel.inner.fail(Terminal::Error(
+            io::ErrorKind::TimedOut,
+            "H2 request timed out".into(),
+        ));
+        timeout(Duration::from_secs(1), async {
+            while !channel.inner.state.lock().unwrap().pending.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(lane.connection.lock().unwrap().sender.is_none());
+        let active = lane.active_requests.lock().unwrap();
+        assert!(!active.counts.contains_key(&generation));
+        assert!(!active.invalidate_when_idle.contains(&generation));
+        drop(active);
+
         lane.close();
         server.abort();
     }

@@ -777,7 +777,7 @@ impl Upstream {
             let tcp=TcpStream::connect((host,443)).await?;
             let tls=self.verified.connect("raw.githubusercontent.com",tcp).await.map_err(io::Error::other)?;
             let mut wire=BufReader::with_capacity(4096,tls);
-            wire.write_all(b"GET /Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt HTTP/1.1\r\nHost: raw.githubusercontent.com\r\nUser-Agent: tgws-rust/1.11.1\r\nAccept-Encoding: identity\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
+            wire.write_all(b"GET /Flowseal/tg-ws-proxy/main/.github/cfproxy-domains.txt HTTP/1.1\r\nHost: raw.githubusercontent.com\r\nUser-Agent: tgws-rust/1.11.2\r\nAccept-Encoding: identity\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
             wire.flush().await?;
             let (status,headers)=websocket::read_http_headers(&mut wire).await?;
             if status!=200 { return Err(io::Error::other(websocket::HttpError(status))); }

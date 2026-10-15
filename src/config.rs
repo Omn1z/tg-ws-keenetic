@@ -2,8 +2,8 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io, net::IpAddr, path::Path};
 
-pub const UPSTREAM_VERSION: &str = "1.11.1";
-pub const UPSTREAM_COMMIT: &str = "18175fb4fe567cf6aef61f9d883eff010c9e66a8";
+pub const UPSTREAM_VERSION: &str = "1.11.2";
+pub const UPSTREAM_COMMIT: &str = "307a384ab7f522e34bb1a045884d0bd90f40bee5";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
